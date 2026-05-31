@@ -63,6 +63,18 @@ If you want Claude or Grok routes, install Claude Code CLI or Grok CLI first. If
 
 If model switching breaks after a Codex App update, run step 3 first to diagnose, then rerun step 1 if needed. The gateway runs as its own launchd process, so normal app updates do not kill it.
 
+## API spend policy
+
+多模型協作預設不得使用按量 API fan-out。內建 GPT 路由是 ChatGPT subscription passthrough，Claude/Grok 走 CLI/OAuth；未來新增 Minimax、本地 OpenAI-compatible 或其他 API adapter 時，必須先進白名單並取得人類確認。
+
+Allowed API classes are:
+
+- `local-openai-compatible` — local/LAN Ollama, LM Studio, vLLM, llama.cpp server, or equivalent non-metered local endpoint.
+- `minimax-near-unlimited-api` — Minimax or equivalent near-unlimited/low-risk quota plan confirmed by the human user.
+- `user-approved-api:<provider>/<model>` — explicitly approved for this task, with endpoint/runtime, billing model, budget cap, and stop condition.
+
+The gateway exposes this via `/healthz.api_spend_policy`. `GATEWAY_API_MODEL_ALLOWLIST` may list approved classes for diagnostics; it does not automatically enable any API adapter.
+
 ## 內容
 
 ## Contents

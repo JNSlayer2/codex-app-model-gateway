@@ -124,6 +124,21 @@ test("model catalog exposes GPT, Claude, and Grok slugs from the single gateway 
   );
 });
 
+test("healthz exposes deny-by-default API spend policy", async (t) => {
+  const gateway = await startGateway({ GATEWAY_API_MODEL_ALLOWLIST: "local-openai-compatible,minimax-near-unlimited-api" });
+  t.after(async () => gateway.close());
+
+  const health = await requestJson(`http://127.0.0.1:${gateway.port}/healthz`);
+
+  assert.equal(health.api_spend_policy.default, "deny_metered_api_fanout");
+  assert.equal(health.api_spend_policy.human_confirmation_required, true);
+  assert.deepEqual(health.api_spend_policy.active_api_model_allowlist, [
+    "local-openai-compatible",
+    "minimax-near-unlimited-api",
+  ]);
+  assert.equal(health.capabilities.claude.backend, "claude_cli");
+});
+
 test("GPT models are proxied to the ChatGPT Codex subscription endpoint", async (t) => {
   const upstream = await startMockChatgpt();
   t.after(() => upstream.server.close());

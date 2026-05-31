@@ -56,6 +56,7 @@ bash scripts/post-update-check.sh --full
 - Codex App 左側專案列表不因 provider split 遺失既有未封存 threads；`post-update-check.sh` 的 sidebar provider coherence 必須通過。
 - Gateway 對大型 context request 不得 reset socket 造成 Codex App `stream disconnected before completion` retry storm；超過上限時要回乾淨的 `413`。預設 body 上限是 `64MB`，可用 `GATEWAY_MAX_BODY_BYTES` 覆寫。
 - Claude/Grok backend 的登入、OAuth、quota、session limit 這類使用者可處理狀態，不得用 streaming `response.failed` 回給 Codex App；要轉成可見的 completed assistant message，避免 App 誤判為 stream 斷線並重試。
+- 多模型協作不得默默走按量 API。Gateway 預設 `deny_metered_api_fanout`；只有 `local-openai-compatible`、`minimax-near-unlimited-api`、或 `user-approved-api:<provider>/<model>` 這類白名單模型/端點，且人類明確確認 provider、endpoint、計費型態、預算/停止條件後，才能啟用 API route。
 - request-scoped tool bridge 測試通過：Claude 只能輸出工具意圖，gateway 轉成 Responses `function_call`，Codex App 執行工具後的 `function_call_output` 能回灌下一輪 prompt。
 - 本機 default config 已備份後設定 `model_provider = "model_gateway"`；同時一次性備份並合併未封存 `openai` threads 的 SQLite `threads.model_provider` 與 rollout 首行 `session_meta.payload.model_provider`，避免 sidebar 失去舊聊天。不做 watcher。
 - GitHub/交接版本不得包含 auth、token、state database、完整 logs、rollout 全文、私人 thread id、本機絕對路徑、私有截圖、renderer reverse-engineering 細節或可被當成攻擊 playbook 的內容。
@@ -69,6 +70,7 @@ bash scripts/post-update-check.sh --full
 - 不把 Codex tools 寫入外部模型的全域環境；外部模型原生 app 回到自己的 runtime 時不能看到 Codex App 的 MCP、computer use、plan/goal tools。
 - 不把 `models_cache.json` 當主要真相來源。它可以作為 cache/diagnostic，但穩定真相是 gateway `/v1/models`、Codex config provider 與 app-server thread provider。
 - 不把 Claude text response 誤標成完整 Codex agent 相容；工具橋未測的功能必須標成 experimental 或 not implemented。
+- 不因環境存在 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`XAI_API_KEY`、`MINIMAX_API_KEY` 或相容 key 就自動開 API subagent fan-out；未白名單 API route 必須停用。
 
 ## 架構
 
@@ -93,6 +95,17 @@ Gateway 依 `request.model` 分流：
 - `opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6`：呼叫 Claude CLI，使用 `--no-session-persistence`、空 MCP config、停用 slash commands、禁止 Claude 原生工具執行。`opus4.7`、`opus4.8`、`sonnet4.6`、`haiku4.6` 可作為相容 alias，但 catalog slug 保留 Codex 已驗證可解析的 hyphen form。
 - Grok `grok-build`：呼叫 Grok CLI，保留 Grok CLI 自己的模型命名，gateway request 內停用 plan/memory/web search/native tools；Codex tools 仍只走 request-scoped prompt bridge。
 - 未來模型：只新增 catalog entry 與 backend adapter，不新增 Codex provider；先補 capability matrix，再補 tests。
+
+### API 白名單模型政策
+
+目前內建路由不是按量 API key fan-out：GPT 是 ChatGPT subscription passthrough，Claude/Grok 是已登入 CLI/OAuth。未來新增 Minimax、本地模型或其他 API backend 時，必須先填 `/healthz.api_spend_policy` 與 model `capabilities.api_spend`：
+
+- 預設：`deny_metered_api_fanout`。
+- 可用 API 白名單：`local-openai-compatible`、`minimax-near-unlimited-api`、`user-approved-api:<provider>/<model>`。
+- 啟用條件：人類明確確認 provider/model、endpoint/runtime、計費或額度型態、最大可接受花費/用量與停止條件。
+- 若發現多模型協作走了未白名單 API，立即停用該 adapter/key path，保存 checkpoint，改走訂閱 CLI、本地模型或白名單 API。
+
+可用 `GATEWAY_API_MODEL_ALLOWLIST=local-openai-compatible,minimax-near-unlimited-api` 讓 `/healthz` 顯示本機允許的 API 類型；這只是聲明與診斷，不代表自動啟用任何 API adapter。
 
 ## Request-Scoped Tool Bridge
 
@@ -241,6 +254,7 @@ app-server same-thread 驗收要檢查這三件事：
 - Claude 只回文字不能用工具：看 `/healthz` 的 Claude `codex_tools` 是否仍是 `not_implemented`，或 request 是否真的帶 `tools` schema。
 - Codex App 對 `127.0.0.1:4177/v1/responses` 顯示 `stream disconnected before completion` 並反覆 `Reconnecting... 1/5→5/5`：先看 gateway 是否仍在舊 2MB body cap。修：更新 runtime 到含 `GATEWAY_MAX_BODY_BYTES` 的版本，預設 64MB；超限要回 `413 request body too large`，不可 `req.destroy()` reset socket。重啟：`launchctl kickstart -k gui/$(id -u)/com.$(id -un).codex-model-gateway`。
 - Claude/Grok session limit 或未登入時出現同樣 reconnect loop：gateway 把 backend limit/auth 當 `response.failed` 送出，Codex App 會 retry。修：更新 runtime 到「backend notice completes visibly」版本；此時 UI 應收到一則 assistant 訊息說明 limit/auth，而不是 `response.failed`。
+- 多模型協作開始消耗 API 額度或看到未知 API key 被使用：立即停用該 API route / adapter / key path；只有 `local-openai-compatible`、`minimax-near-unlimited-api` 或人類針對本次任務明確批准的 `user-approved-api:<provider>/<model>` 可以恢復。恢復前必須記錄 provider、endpoint、計費/額度型態、預算上限與停止條件。
 - Claude turn 顯示完成但 App 沒有可見 assistant message：檢查 gateway SSE 是否對文字回覆送出 `response.output_item.done`，並跑 `Claude text responses emit completed assistant message items for Codex App persistence` 測試。
 - Claude 要求不存在的 tool：gateway 必須拒絕，不能交給 Claude 原生 runtime 嘗試執行。
 - UI dropdown 看不到模型但 CLI/gateway 正常：記為 Codex App UI/cache/upstream issue，不 patch signed app，不提交 reverse-engineering notes。
@@ -292,3 +306,4 @@ app-server same-thread 驗收要檢查這三件事：
 - 2026-06-01：UI 可見性補強——只把目前 thread 遷到 `model_gateway` 會讓其他未封存 `openai` threads 在左側專案列表看似消失。對策：安裝器預設跑 backed-up sidebar provider merge；`post-update-check.sh` 新增 coherence gate。
 - 2026-06-01：大型 ultrawork prompt 會超過舊 2MB body cap，gateway reset socket 導致 Codex App 無限 `stream disconnected` + retry。對策：預設 body cap 調到 64MB，可用 `GATEWAY_MAX_BODY_BYTES` 覆寫；超限回 413，不 reset socket。
 - 2026-06-01：Claude session limit 也會因 `response.failed` 被 Codex App 當斷線重試。對策：backend quota/auth/login 類錯誤改成 completed assistant message，保留可見錯誤但停止 retry storm。
+- 2026-06-01：多模型協作必須防止未授權 API fan-out 燒額度。對策：skill 與 `/healthz` 加入 deny-by-default API spend policy；白名單只允許本地無上限、Minimax 近吃到飽或人類逐案批准的 API。

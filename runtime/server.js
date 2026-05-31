@@ -59,6 +59,29 @@ const grokRoutes = {
   },
 };
 
+function csvEnv(name) {
+  return String(process.env[name] || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+const apiSpendPolicy = {
+  default: "deny_metered_api_fanout",
+  human_confirmation_required: true,
+  allowed_api_model_classes: [
+    "local-openai-compatible",
+    "minimax-near-unlimited-api",
+    "user-approved-api:<provider>/<model>",
+  ],
+  active_api_model_allowlist: csvEnv("GATEWAY_API_MODEL_ALLOWLIST"),
+  current_routes: {
+    openai: "chatgpt_subscription_passthrough_not_api_key",
+    claude: "cli_subscription_not_api_key",
+    grok: "cli_oauth_not_api_key",
+  },
+};
+
 const reasoningLevels = [
   { effort: "low", description: "Fast responses with lighter reasoning" },
   { effort: "medium", description: "Balances speed and reasoning depth for everyday tasks" },
@@ -194,6 +217,7 @@ function modelsPayload() {
         codex_tools: "passthrough",
         computer_use: "passthrough",
         backend: "chatgpt_subscription",
+        api_spend: "subscription_passthrough_not_api_key",
         isolation: "codex_first_party",
       },
     }),
@@ -218,6 +242,7 @@ function modelsPayload() {
         codex_tools: "prompt_bridge_experimental",
         computer_use: "prompt_bridge_experimental_when_codex_exposes_tool_schema",
         backend: "claude_cli",
+        api_spend: "cli_subscription_not_api_key",
         isolation: "ephemeral_request_only",
       },
     }),
@@ -242,6 +267,7 @@ function modelsPayload() {
         codex_tools: "prompt_bridge_experimental",
         computer_use: "prompt_bridge_experimental_when_codex_exposes_tool_schema",
         backend: "grok_cli",
+        api_spend: "cli_oauth_not_api_key",
         isolation: "ephemeral_request_only",
       },
     }),
@@ -260,6 +286,7 @@ function healthPayload() {
     requires_openai_auth: true,
     chatgpt_subscription_passthrough: "proxy",
     chatgpt_base_url: CHATGPT_CODEX_BASE_URL,
+    api_spend_policy: apiSpendPolicy,
     capabilities: {
       openai: {
         text: "passthrough",
