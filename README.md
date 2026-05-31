@@ -4,6 +4,30 @@
 
 Use a **single provider** `model_gateway` for Codex App, and switch between **GPT / Claude / Grok inside the same thread** by changing only the `model`, not the provider. No patching of the signed Codex App bundle.
 
+## Companion project / 搭配專案
+
+This repo is designed to pair with **[open-ultrawork](https://github.com/JNSlayer2/open-ultrawork)**.
+
+- **`codex-app-model-gateway`** is the **connection layer**: it helps an AI agent take Codex App and accurately turn it into a runtime that can route into other AI brands and models.
+- **`open-ultrawork`** is the **workflow layer**: it defines how to use those connected models for cross-vendor Dynamic Workflows, adversarial validation, and cost-optimized heavy-project execution.
+
+In short:
+
+> `codex-app-model-gateway` makes Codex App **able to connect to other AI models**.  
+> `open-ultrawork` tells you **how to use those models together well**.
+
+本 repo 是跟 **[open-ultrawork](https://github.com/JNSlayer2/open-ultrawork)** 搭配使用的一組 skill。
+
+- **`codex-app-model-gateway`** 是**接入層**：讓你的 AI 拿到之後，可以比較準確地把 Codex App 改良成能接入他牌 AI 模型的環境。
+- **`open-ultrawork`** 是**工作流層**：定義怎麼把這些接進來的模型拿來做多品牌 Dynamic Workflows、對抗驗證，以及重專案下的省錢分工。
+
+簡單講：
+
+> `codex-app-model-gateway` 讓 Codex App **接得到其他模型**。  
+> `open-ultrawork` 告訴你 **接進來之後怎麼一起協作才對**。
+
+例如，如果未來某個模型或 adapter 被接進 gateway，像 Minimax 這類外部模型就有機會在 Codex App 這個工作流裡使用到同一套 request-scoped tools、computer use 與多模型分工邏輯，形成真正可落地的跨品牌協作。
+
 > **免責聲明 / Disclaimer**：本工具讓你在自己付費的 Codex App 內把模型切到 Claude / Grok，並讓 GPT 透過你**自己的** ChatGPT 訂閱 session 繼續運作。它只代理「你自己已登入」的 session，不分發、不竊取任何憑證。但「以本機 proxy 轉發 ChatGPT 訂閱 session」可能牴觸 OpenAI ChatGPT 訂閱條款（訂閱條款對自動化／代理／非官方介面通常比 API 條款更嚴）；Claude CLI / Grok CLI 的包裝亦各受其供應商條款約束。**是否使用、是否合規由你自負**，請先自行確認 OpenAI / Anthropic / xAI 當前條款。private-first，公開散布前自評帳號風險。工具按「現狀（as-is）」提供，無任何擔保。
 
 ## 一鍵安裝（拿到就能裝）
