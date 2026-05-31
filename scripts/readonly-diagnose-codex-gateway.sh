@@ -107,6 +107,13 @@ fi
 section "State Summary"
 if [[ -f "$state_db" ]] && command -v sqlite3 >/dev/null 2>&1; then
   sqlite3 "$state_db" "select model_provider,count(*) from threads where archived=0 group by model_provider order by count(*) desc;" 2>/dev/null || true
+  openai_unarchived="$(sqlite3 "$state_db" "select count(*) from threads where archived=0 and model_provider='openai';" 2>/dev/null || echo 0)"
+  if [[ "${openai_unarchived:-0}" != "0" ]]; then
+    echo "risk: unarchived openai threads may be hidden after switching the app to model_gateway"
+    echo "fix: bash scripts/migrate-sidebar-threads-to-gateway.sh"
+  else
+    echo "ok: no unarchived openai thread/provider split"
+  fi
 else
   printf 'state_db: missing_or_sqlite_unavailable (%s)\n' "$state_db" | redact
 fi

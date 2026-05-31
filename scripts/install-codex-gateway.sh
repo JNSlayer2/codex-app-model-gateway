@@ -160,12 +160,29 @@ PROV_EOF
 fi
 c_ok "config 已設 model_provider = model_gateway（${CFG}）"
 
-# 4) (re)load the gateway
+# 4) keep the Codex sidebar coherent after changing the top-level provider.
+# Existing unarchived threads can remain pinned to model_provider=openai; when
+# the app is now running as model_gateway, those threads may disappear from the
+# project sidebar even though they were not deleted. Do a backed-up one-time
+# merge unless explicitly disabled.
+if [ "${SKIP_THREAD_PROVIDER_MIGRATION:-0}" = "1" ]; then
+  c_warn "略過 thread provider migration；若專案列表顯示沒有聊天，請跑 scripts/migrate-sidebar-threads-to-gateway.sh"
+elif [ -f "$SCRIPT_DIR/migrate-sidebar-threads-to-gateway.sh" ]; then
+  if CODEX_HOME="$CFG_HOME" bash "$SCRIPT_DIR/migrate-sidebar-threads-to-gateway.sh" >/tmp/install-thread-provider-migration.log 2>&1; then
+    c_ok "thread provider 已合併到 model_gateway（sidebar-safe；見 /tmp/install-thread-provider-migration.log）"
+  else
+    c_warn "thread provider migration 未完成（見 /tmp/install-thread-provider-migration.log）；若 sidebar 少 thread，先修這項"
+  fi
+else
+  c_warn "找不到 migrate-sidebar-threads-to-gateway.sh；無法自動避免 sidebar provider split"
+fi
+
+# 5) (re)load the gateway
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST" || die "launchctl bootstrap 失敗"
 c_ok "gateway 已載入 launchd"
 
-# 5) verify
+# 6) verify
 ok=1
 curl --retry 15 --retry-delay 1 --retry-connrefused -fsS --max-time 8 "$URL/healthz" >/tmp/install-health.json 2>/dev/null \
   && [ "$(jq -r .ok /tmp/install-health.json 2>/dev/null)" = "true" ] && c_ok "healthz ok" || { c_no "healthz 失敗"; ok=0; }

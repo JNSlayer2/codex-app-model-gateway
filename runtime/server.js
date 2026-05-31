@@ -106,18 +106,29 @@ function json(res, status, payload) {
   res.end(body);
 }
 
+// Heavy agent tasks (e.g. ultrawork) accumulate large contexts; a 2 MB cap reset the
+// socket mid-send, which Codex surfaced as "error sending request" + a retry storm.
+// Default to 64 MB, overridable via env, and respond with a clean 413 instead of
+// destroying the connection before the handler can reply.
+const MAX_BODY_BYTES = Number(process.env.GATEWAY_MAX_BODY_BYTES) || 64 * 1024 * 1024;
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = "";
+    let aborted = false;
     req.setEncoding("utf8");
     req.on("data", (chunk) => {
+      if (aborted) return;
       data += chunk;
-      if (data.length > 2_000_000) {
-        reject(new Error("request body too large"));
-        req.destroy();
+      if (data.length > MAX_BODY_BYTES) {
+        aborted = true;
+        const err = new Error(`request body too large (> ${MAX_BODY_BYTES} bytes)`);
+        err.statusCode = 413;
+        reject(err);
+        req.resume(); // drain remaining bytes without buffering so the handler can reply
       }
     });
-    req.on("end", () => resolve(data));
+    req.on("end", () => { if (!aborted) resolve(data); });
     req.on("error", reject);
   });
 }
@@ -453,10 +464,37 @@ function isModelError(text) {
   return /invalid model|unknown model|model .*not|not available|unsupported model/i.test(text);
 }
 
+function isBackendNoticeError(error) {
+  const text = String(error?.message || "");
+  return /session limit|rate limit|rate_limit|resets|quota|usage limit|not authenticated|login|oauth|subscription/i.test(text);
+}
+
+function backendNoticeText(model, error) {
+  const message = String(error?.message || "backend unavailable")
+    .replace(/\s+/g, " ")
+    .slice(0, 500);
+  return [
+    `${model} backend is temporarily unavailable: ${message}`,
+    "Codex model_gateway returned this as a completed assistant message so Codex App will not enter a retry loop.",
+  ].join("\n");
+}
+
 function runClaudeOnce(model, prompt) {
   return new Promise((resolve) => {
     if (process.env.CLAUDE_MOCK_PROMPT_FILE) {
       fs.writeFileSync(process.env.CLAUDE_MOCK_PROMPT_FILE, prompt);
+    }
+    if (process.env.CLAUDE_MOCK_ERROR_TEXT !== undefined) {
+      resolve({
+        ok: false,
+        model,
+        code: 1,
+        signal: null,
+        text: "",
+        raw_error: process.env.CLAUDE_MOCK_ERROR_TEXT,
+        usage: null,
+      });
+      return;
     }
     if (process.env.CLAUDE_MOCK_RESPONSE_JSON !== undefined) {
       resolve({
@@ -1085,7 +1123,7 @@ async function handleResponses(req, res) {
     bodyText = await readBody(req) || "{}";
     body = JSON.parse(bodyText);
   } catch (error) {
-    return json(res, 400, { error: { message: error.message } });
+    return json(res, error.statusCode || 400, { error: { message: error.message } });
   }
   const model = body.model;
   const routeModel = claudeAliases[model] || model;
@@ -1145,6 +1183,15 @@ async function handleResponses(req, res) {
     sse(res, { type: "response.completed", response });
     res.end();
   } catch (error) {
+    if (routeKind && isBackendNoticeError(error)) {
+      const { response, output } = responseObjects(backendNoticeText(model, error), model);
+      if (!stream) return json(res, 200, response);
+      sse(res, { type: "response.created", response: { ...response, status: "in_progress", output: [] } });
+      sse(res, { type: "response.output_item.done", item: output[0] });
+      sse(res, { type: "response.completed", response });
+      res.end();
+      return;
+    }
     const payload = {
       type: "response.failed",
       error: {

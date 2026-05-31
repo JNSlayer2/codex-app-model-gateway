@@ -11,11 +11,13 @@ metadata:
 
 目標是讓 Codex App 只使用一個穩定 provider：`model_gateway`。同一條 thread 內只切換 `model`，不切換 provider。GPT 走 Codex ChatGPT subscription passthrough；Claude `opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6` 走 Claude CLI adapter，display name 用 `opus4.7`、`opus4.8`、`sonnet4.6`、`haiku4.6`；所有工具能力都由 Codex App request-scoped tool bridge 掌握。
 
+**穩定交付的 UI 定義**：不只 gateway health、catalog 與 live smoke 要綠，Codex App 左側專案列表也不能因 provider split 顯示「沒有聊天」。若全域 `model_provider` 已切到 `model_gateway`，未封存 `openai` threads 必須經一次性備份後合併到 `model_gateway`，否則 App 可能只顯示 gateway threads，讓舊專案看似消失。
+
 ## 一鍵部署 / 維修（每台機器先跑這個）
 
 > **給 AI 安裝代理（照這個跑）**：依序執行下面三步，以 exit code 判成敗（`0`=成功）。
 > 1. `bash scripts/install-codex-gateway.sh --preflight` — 只讀，列出本機缺的 CLI / 登入 / `CODEX_HOME` 雷。
-> 2. `MODEL_GATEWAY_DIR=<gateway-dir> bash scripts/install-codex-gateway.sh` — 實際安裝（偵測路徑→寫 plist+config→載入→驗收）。
+> 2. `MODEL_GATEWAY_DIR=<gateway-dir> bash scripts/install-codex-gateway.sh` — 實際安裝（偵測路徑→寫 plist+config→合併未封存 thread provider→載入→驗收）。
 > 3. `bash scripts/post-update-check.sh` — 驗收，**必須 exit 0** 才算成功。
 >
 > **你（AI）不能代做的只有登入**：若 preflight 顯示需要 `codex login` 或 `grok login --oauth`，停下來請人類在終端機自己跑（互動式 OAuth），完成後再回到第 2/3 步。其餘全自動、idempotent、會備份、不碰 signed app bundle。
@@ -51,8 +53,11 @@ bash scripts/post-update-check.sh --full
 - 四個 Claude slug 都至少跑一次 `/v1/responses` 極短 smoke test，看到 `response.completed`。Grok CLI 可用時，`grok-build` 也要跑一次同等 smoke。
 - Claude 文字回覆必須送出 assistant message 的 `response.output_item.done`，不能只有 `response.output_item.added` 或 `response.output_text.done`；否則 Codex App 可能完成 turn 但不落盤可見回覆。
 - app-server 層建立 thread 時 `modelProvider` 是 `model_gateway`；後續 `turn/start` 只改 `model`，能在同一 thread 內先跑 GPT 再跑 Claude。
+- Codex App 左側專案列表不因 provider split 遺失既有未封存 threads；`post-update-check.sh` 的 sidebar provider coherence 必須通過。
+- Gateway 對大型 context request 不得 reset socket 造成 Codex App `stream disconnected before completion` retry storm；超過上限時要回乾淨的 `413`。預設 body 上限是 `64MB`，可用 `GATEWAY_MAX_BODY_BYTES` 覆寫。
+- Claude/Grok backend 的登入、OAuth、quota、session limit 這類使用者可處理狀態，不得用 streaming `response.failed` 回給 Codex App；要轉成可見的 completed assistant message，避免 App 誤判為 stream 斷線並重試。
 - request-scoped tool bridge 測試通過：Claude 只能輸出工具意圖，gateway 轉成 Responses `function_call`，Codex App 執行工具後的 `function_call_output` 能回灌下一輪 prompt。
-- 本機 default config 已備份後設定 `model_provider = "model_gateway"`；若要遷移既有 thread，只能針對指定 thread 做一次性 SQLite + rollout 首行遷移，不做 watcher。
+- 本機 default config 已備份後設定 `model_provider = "model_gateway"`；同時一次性備份並合併未封存 `openai` threads 的 SQLite `threads.model_provider` 與 rollout 首行 `session_meta.payload.model_provider`，避免 sidebar 失去舊聊天。不做 watcher。
 - GitHub/交接版本不得包含 auth、token、state database、完整 logs、rollout 全文、私人 thread id、本機絕對路徑、私有截圖、renderer reverse-engineering 細節或可被當成攻擊 playbook 的內容。
 
 ## 不可破壞邊界
@@ -155,9 +160,17 @@ cp "$HOME/.codex/models_cache.json" "$HOME/.codex/backups/model-gateway-v3-$TS/m
 
 6. 驗證 model catalog。若 `codex debug models` 缺 Claude，但 gateway `/v1/models` 正常，先檢查 provider parse error。常見原因：model catalog 的必填欄位型別錯，例如 `base_instructions` 不能是 `null`。
 
-7. 驗證 app-server same-thread。不要用 `send-message-v2 -c model_provider=...` 當 provider 驗收；該 helper 可能仍用既有 `openai` thread。必須建立或恢復 `model_gateway` thread，再用 `turn/start` 切不同 `model`。
+7. 驗證 sidebar provider coherence。若 `state_5.sqlite` 仍有未封存 `openai` threads，而全域 provider 是 `model_gateway`，左側專案列表可能顯示「沒有聊天」。執行：
 
-8. 遷移既有 thread 時只處理使用者指定 thread。先備份，再同時改 SQLite `threads.model_provider` 與該 rollout 第一行 `session_meta.payload.model_provider`。不要批量改全部歷史 thread，除非使用者明確要求。
+```bash
+bash scripts/migrate-sidebar-threads-to-gateway.sh
+```
+
+這個腳本會先備份 SQLite 與受影響 rollout，再把未封存 `openai` threads 合併到 `model_gateway`。不要用 watcher 反覆修。
+
+8. 驗證 app-server same-thread。不要用 `send-message-v2 -c model_provider=...` 當 provider 驗收；該 helper 可能仍用既有 `openai` thread。必須建立或恢復 `model_gateway` thread，再用 `turn/start` 切不同 `model`。
+
+9. 遷移既有 thread 時的原則：若只是修單條 thread 的模型選單，可只處理指定 thread；若全域 provider 已改成 `model_gateway` 且 sidebar 隱藏舊聊天，必須處理所有未封存 `openai` threads，否則 UI 交付不穩。兩種情境都必須先備份，不得批量處理已封存歷史 thread，除非使用者明確要求。
 
 ## 驗收命令
 
@@ -226,10 +239,13 @@ app-server same-thread 驗收要檢查這三件事：
 - `Model Gateway received gpt-5.5, but GPT subscription passthrough is not implemented`：gateway 還在舊版，必須補 GPT proxy，不可把預設 provider 切回 per-model/provider 分派系。
 - `codex debug models` 只剩 GPT：先看 gateway `/v1/models` 是否正確，再看 catalog JSON 欄位型別是否讓 Codex parse fallback。
 - Claude 只回文字不能用工具：看 `/healthz` 的 Claude `codex_tools` 是否仍是 `not_implemented`，或 request 是否真的帶 `tools` schema。
+- Codex App 對 `127.0.0.1:4177/v1/responses` 顯示 `stream disconnected before completion` 並反覆 `Reconnecting... 1/5→5/5`：先看 gateway 是否仍在舊 2MB body cap。修：更新 runtime 到含 `GATEWAY_MAX_BODY_BYTES` 的版本，預設 64MB；超限要回 `413 request body too large`，不可 `req.destroy()` reset socket。重啟：`launchctl kickstart -k gui/$(id -u)/com.$(id -un).codex-model-gateway`。
+- Claude/Grok session limit 或未登入時出現同樣 reconnect loop：gateway 把 backend limit/auth 當 `response.failed` 送出，Codex App 會 retry。修：更新 runtime 到「backend notice completes visibly」版本；此時 UI 應收到一則 assistant 訊息說明 limit/auth，而不是 `response.failed`。
 - Claude turn 顯示完成但 App 沒有可見 assistant message：檢查 gateway SSE 是否對文字回覆送出 `response.output_item.done`，並跑 `Claude text responses emit completed assistant message items for Codex App persistence` 測試。
 - Claude 要求不存在的 tool：gateway 必須拒絕，不能交給 Claude 原生 runtime 嘗試執行。
 - UI dropdown 看不到模型但 CLI/gateway 正常：記為 Codex App UI/cache/upstream issue，不 patch signed app，不提交 reverse-engineering notes。
-- 既有 thread 仍走 `openai`：thread provider 已固化。只遷移指定 thread 的 SQLite + rollout 首行，或新建 `model_gateway` thread。
+- 模型下拉已出現外部模型，但左側專案列表或專案內舊 thread 顯示「沒有聊天」：不是刪除，是 provider split。全域 provider 已切到 `model_gateway`，但舊未封存 threads 還是 `openai`，App 只列目前 provider。修：`bash scripts/migrate-sidebar-threads-to-gateway.sh`，再 `Cmd+R` 或重開 Codex App。
+- 單條既有 thread 仍走 `openai`：thread provider 已固化。可遷移指定 thread 的 SQLite + rollout 首行，或新建 `model_gateway` thread。
 
 實機部署常見失敗（多台機器跑不起來，幾乎都是這幾個；安裝器會自動處理前三個）：
 
@@ -273,3 +289,6 @@ app-server same-thread 驗收要檢查這三件事：
 - 2026-06-01：`CODEX_HOME` 預設指 noowners 外接卷會讓 codex crash／撤卷存取。對策：安裝器與 post-update-check 都偵測並警告，跑 codex 一律帶 `CODEX_HOME=$HOME/.codex`。
 - 2026-06-01：腳本若用 bash 4 關聯陣列會在 macOS 內建 bash 3.2 直接失敗。對策：所有腳本維持 3.2 相容（用 `case` 去重，不用 `declare -A`）。
 - 2026-06-01：runtime 韌性補強——`runClaudeOnce` 補 `child.on('error')`（避免 binary 移動崩整個 gateway）、子程序 stdout 加上限（避免 OOM）、`/healthz` 不再洩 `last_error` 內文、OpenAI slug regex 放寬（未來模型不 404）。npm test 9→12 綠。
+- 2026-06-01：UI 可見性補強——只把目前 thread 遷到 `model_gateway` 會讓其他未封存 `openai` threads 在左側專案列表看似消失。對策：安裝器預設跑 backed-up sidebar provider merge；`post-update-check.sh` 新增 coherence gate。
+- 2026-06-01：大型 ultrawork prompt 會超過舊 2MB body cap，gateway reset socket 導致 Codex App 無限 `stream disconnected` + retry。對策：預設 body cap 調到 64MB，可用 `GATEWAY_MAX_BODY_BYTES` 覆寫；超限回 413，不 reset socket。
+- 2026-06-01：Claude session limit 也會因 `response.failed` 被 Codex App 當斷線重試。對策：backend quota/auth/login 類錯誤改成 completed assistant message，保留可見錯誤但停止 retry storm。

@@ -71,15 +71,30 @@ if printf '%s' "$b" | rg -q 'requires Codex ChatGPT Authorization'; then pass "G
 elif printf '%s' "$b" | rg -q 'response.completed'; then pass "GPT route 回了完整回應"
 else warn "GPT route 回應異常"; note "'not implemented'→gateway 退版；404→config provider 沒接上"; fi
 
+echo "[6] sidebar thread provider coherence（避免專案列表顯示沒有聊天）"
+state_db="$SAFE_CODEX_HOME/state_5.sqlite"
+if [ -f "$state_db" ] && command -v sqlite3 >/dev/null 2>&1; then
+  openai_threads="$(sqlite3 "$state_db" "select count(*) from threads where archived=0 and model_provider='openai';" 2>/dev/null || echo 0)"
+  gateway_threads="$(sqlite3 "$state_db" "select count(*) from threads where archived=0 and model_provider='model_gateway';" 2>/dev/null || echo 0)"
+  if [ "${openai_threads:-0}" = "0" ]; then
+    pass "unarchived threads all use model_gateway ($gateway_threads visible)"
+  else
+    warn "$openai_threads unarchived openai thread(s) may be hidden while app runs model_gateway"
+    note "修復：bash $SCRIPT_DIR/migrate-sidebar-threads-to-gateway.sh（會備份 SQLite + rollout 首行）"
+  fi
+else
+  note "state_5.sqlite 不可用，略過 sidebar provider coherence"
+fi
+
 if [ "$full" = 1 ]; then
-  echo "[6] same-thread 驗收（--full，花 Claude quota）"
+  echo "[7] same-thread 驗收（--full，花 Claude quota）"
   if [ -f "$LIVE_VERIFY" ] && [ -n "$GW_DIR" ]; then
     if MODEL_GATEWAY_DIR="$GW_DIR" CODEX_HOME="$SAFE_CODEX_HOME" bash "$LIVE_VERIFY" >/tmp/puc_full.log 2>&1; then
       pass "live-verify 全 PASS（含同 thread 上下文接續）"
     else warn "live-verify 失敗 → tail -30 /tmp/puc_full.log，對照 skill 失敗處理"; fi
   else warn "找不到 live-verify 或 gateway dir（設 LIVE_VERIFY / MODEL_GATEWAY_DIR）"; fi
 else
-  echo "[6] same-thread 驗收：SKIPPED（加 --full 才實際切換、花 quota）"
+  echo "[7] same-thread 驗收：SKIPPED（加 --full 才實際切換、花 quota）"
 fi
 
 echo

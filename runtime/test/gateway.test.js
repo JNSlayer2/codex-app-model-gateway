@@ -161,6 +161,25 @@ test("GPT models are proxied to the ChatGPT Codex subscription endpoint", async 
   assert.equal(upstream.seen[0].body.model, "gpt-5.5");
 });
 
+test("oversized requests return a clean 413 instead of resetting the socket", async (t) => {
+  const gateway = await startGateway({ GATEWAY_MAX_BODY_BYTES: "1024" });
+  t.after(async () => gateway.close());
+
+  const res = await fetch(`http://127.0.0.1:${gateway.port}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "sonnet-4-6",
+      input: "x".repeat(4096),
+      stream: true,
+    }),
+  });
+
+  const body = await res.json();
+  assert.equal(res.status, 413);
+  assert.match(body.error.message, /request body too large/);
+});
+
 test("Claude prompt bridge emits Codex function_call events without executing tools", async (t) => {
   const gateway = await startGateway({
     CLAUDE_MOCK_RESPONSE_JSON: JSON.stringify({
@@ -243,6 +262,32 @@ test("Claude text responses emit completed assistant message items for Codex App
   assert.equal(message.item.status, "completed");
   assert.deepEqual(message.item.content, [{ type: "output_text", text: "OK_VISIBLE_ASSISTANT" }]);
   assert.ok(events.some((event) => event.type === "response.completed"));
+});
+
+test("Claude subscription limits complete visibly instead of triggering Codex retry loops", async (t) => {
+  const gateway = await startGateway({
+    CLAUDE_MOCK_ERROR_TEXT: "You've hit your session limit · resets 4:30am",
+  });
+  t.after(async () => gateway.close());
+
+  const res = await fetch(`http://127.0.0.1:${gateway.port}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "opus-4-7",
+      input: "reply visibly",
+      stream: true,
+    }),
+  });
+
+  const events = parseSseEvents(await res.text());
+  const message = events.find((event) => event.item?.type === "message");
+
+  assert.equal(res.status, 200);
+  assert.equal(message.type, "response.output_item.done");
+  assert.match(message.item.content[0].text, /session limit/);
+  assert.ok(events.some((event) => event.type === "response.completed"));
+  assert.equal(events.some((event) => event.type === "response.failed"), false);
 });
 
 test("Claude prompt bridge includes tool results and namespace tools in request scope", async (t) => {
