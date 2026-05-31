@@ -1,0 +1,26 @@
+.DS_Store
+._*
+.env*
+
+# logs & build junk
+*.log
+logs/
+node_modules/
+
+# local backups created by the installer
+*.bak
+*.bak-*
+backups/
+
+# NEVER commit secrets / local Codex state (enforces 資訊安全規則)
+auth.json
+*.sqlite
+*.sqlite-*
+models_cache.json
+rollout*.jsonl
+*.pem
+*.key
+*.p12
+
+# machine-specific generated plist (installer renders it per machine)
+com.*.codex-model-gateway.plist

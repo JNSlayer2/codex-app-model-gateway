@@ -1,0 +1,7 @@
+interface:
+  display_name: "Codex App Model Gateway v3"
+  short_description: "Codex App 單一 provider、GPT passthrough 與 Claude tool bridge 流程"
+  default_prompt: "使用 $codex-app-model-gateway 設計、診斷、導入或稽核 Codex App Model Gateway v3。"
+
+policy:
+  allow_implicit_invocation: true

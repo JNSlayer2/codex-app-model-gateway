@@ -1,0 +1,9 @@
+{
+  "name": "codex-app-model-gateway",
+  "version": "3.0.1",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}
