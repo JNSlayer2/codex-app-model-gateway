@@ -72,6 +72,17 @@ bash scripts/post-update-check.sh --full
 - 不把 Claude text response 誤標成完整 Codex agent 相容；工具橋未測的功能必須標成 experimental 或 not implemented。
 - 不因環境存在 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`XAI_API_KEY`、`MINIMAX_API_KEY` 或相容 key 就自動開 API subagent fan-out；未白名單 API route 必須停用。
 
+## 全模型預設 fast（reasoning 預設）
+
+Codex App 原生的「fast」切換鍵是 **renderer 寫死綁在原生 `openai` provider** 上的；切到自訂 `model_gateway` provider 後，**任何 catalog 欄位都無法讓那顆鍵出現**（已實測：原生與 gateway 的 gpt-5.5 catalog 逐欄位相同、`service_tiers`/`additional_speed_tiers` 連原生都是空的，差別只在 provider 身分）。要那顆鍵就只能 patch 簽名 App（禁止）或切回原生 provider（失去 dropdown 多模型）。
+
+gateway 端的等效做法：**讓每個模型在選單裡預設停在 fast（低）那一檔**。`buildModelEntry` 的 `default_reasoning_level` 由 `DEFAULT_REASONING_LEVEL`（env `GATEWAY_DEFAULT_REASONING_LEVEL`，預設 `low`）統一供給所有模型。效果：
+
+- GPT passthrough：`low` 透傳 ChatGPT，**實際變快**。
+- Claude / MiniMax / Grok：經 gateway **不消費 reasoning_effort**，但本來就快；`low` 讓 App 預設停在快檔、UI 一致（要深度推理就在該 thread 把選單調高，或開 plan mode）。
+
+搭配 `~/.codex/config.toml` 的 `model_reasoning_effort = "low"` + `service_tier = "fast"`（兩個 config home 都要），即「全模型日常預設 fast」。改完需**完全重開 Codex App**，舊 thread 仍記舊檔。`post-update-check.sh` 已納入此檢查項（全模型 `default_reasoning_level=low`）。
+
 ## 架構
 
 Codex config 只需要一個 provider：
@@ -254,6 +265,8 @@ app-server same-thread 驗收要檢查這三件事：
 - Claude 只回文字不能用工具：看 `/healthz` 的 Claude `codex_tools` 是否仍是 `not_implemented`，或 request 是否真的帶 `tools` schema。
 - Codex App 對 `127.0.0.1:4177/v1/responses` 顯示 `stream disconnected before completion` 並反覆 `Reconnecting... 1/5→5/5`：先看 gateway 是否仍在舊 2MB body cap。修：更新 runtime 到含 `GATEWAY_MAX_BODY_BYTES` 的版本，預設 64MB；超限要回 `413 request body too large`，不可 `req.destroy()` reset socket。重啟：`launchctl kickstart -k gui/$(id -u)/com.$(id -un).codex-model-gateway`。
 - Claude/Grok session limit 或未登入時出現同樣 reconnect loop：gateway 把 backend limit/auth 當 `response.failed` 送出，Codex App 會 retry。修：更新 runtime 到「backend notice completes visibly」版本；此時 UI 應收到一則 assistant 訊息說明 limit/auth，而不是 `response.failed`。
+- 重 turn（ultrawork + 1M-context Claude）跑幾分鐘後 `stream disconnected` / `Reconnecting`，但 body 沒超 cap、gateway 也沒崩：成因是 buffered backend（`sse_after_backend_completion`）在 `await runClaude` 期間零 byte 送出，Codex App idle timeout 先斷線；且 `CLAUDE_TIMEOUT_MS` 預設 2 分鐘會把長 turn SIGKILL。修：runtime 在 stream await 期間每 `GATEWAY_HEARTBEAT_MS`（預設 15s）送 SSE 註解 keepalive 保活（`finally` 清 interval）；plist 把 `CLAUDE_TIMEOUT_MS` 拉到 600000、`GROK_TIMEOUT_MS` 300000。安裝器已內建這些預設並可用同名 env 覆寫。
+- 重度 thread 撞 `ran out of room in the model's context window`：catalog 把 Claude context_window 報成 200K 而 Codex App 依此擋。修：對 1M-capable slug（如 opus-4-8）在 `claudeRoutes` 加 `context_window: 1000000` 並把 `[1m]` 變體放 candidates 第一個（advertise 與後端必須一致）；既有 thread 已固化上限，要開新 thread 才生效。
 - 多模型協作開始消耗 API 額度或看到未知 API key 被使用：立即停用該 API route / adapter / key path；只有 `local-openai-compatible`、`minimax-near-unlimited-api` 或人類針對本次任務明確批准的 `user-approved-api:<provider>/<model>` 可以恢復。恢復前必須記錄 provider、endpoint、計費/額度型態、預算上限與停止條件。
 - Claude turn 顯示完成但 App 沒有可見 assistant message：檢查 gateway SSE 是否對文字回覆送出 `response.output_item.done`，並跑 `Claude text responses emit completed assistant message items for Codex App persistence` 測試。
 - Claude 要求不存在的 tool：gateway 必須拒絕，不能交給 Claude 原生 runtime 嘗試執行。
@@ -307,3 +320,4 @@ app-server same-thread 驗收要檢查這三件事：
 - 2026-06-01：大型 ultrawork prompt 會超過舊 2MB body cap，gateway reset socket 導致 Codex App 無限 `stream disconnected` + retry。對策：預設 body cap 調到 64MB，可用 `GATEWAY_MAX_BODY_BYTES` 覆寫；超限回 413，不 reset socket。
 - 2026-06-01：Claude session limit 也會因 `response.failed` 被 Codex App 當斷線重試。對策：backend quota/auth/login 類錯誤改成 completed assistant message，保留可見錯誤但停止 retry storm。
 - 2026-06-01：多模型協作必須防止未授權 API fan-out 燒額度。對策：skill 與 `/healthz` 加入 deny-by-default API spend policy；白名單只允許本地無上限、Minimax 近吃到飽或人類逐案批准的 API。
+- 2026-06-01：把 Codex App 環境調到能穩定承載「gateway + ultrawork-claude」重載。三個真兇都不是 gateway 崩潰：(1) launchd job 沒 bootstrap → 4177 無 listener；(2) Claude catalog 報 200K context，重 thread 被擋 → opus-4-8 改走 `[1m]` 變體並 advertise 1M；(3) buffered SSE 在長 turn 期間零 byte + 2 分鐘 timeout → 加 15s SSE keepalive + `CLAUDE_TIMEOUT_MS` 600000。教訓：多接模型的「不穩」幾乎全在外掛 CLI 那層（context/timeout/idle-disconnect/launchd），GPT passthrough 本身穩；對症調 timeout/keepalive/context 比精簡或回滾更符合使用者要保留全模型的需求。調校已寫進 installer 預設（同名 env 可覆寫），server.js 不被 installer 覆寫故 heartbeat 改動 durable。

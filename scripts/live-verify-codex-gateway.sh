@@ -5,11 +5,13 @@ gateway_url="${GATEWAY_URL:-http://127.0.0.1:4177}"
 gateway_dir="${MODEL_GATEWAY_DIR:-}"
 run_claude="${RUN_CLAUDE_SMOKE:-1}"
 run_grok="${RUN_GROK_SMOKE:-1}"
+run_minimax="${RUN_MINIMAX_SMOKE:-0}"
 run_app_server="${RUN_APP_SERVER_SMOKE:-1}"
 run_same_thread="${RUN_SAME_THREAD_SMOKE:-1}"
-models_re='^(gpt-5\.5|opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6|grok-build)$'
+models_re='^(gpt-5\.5|opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6|grok-build|minimax-m3)$'
 claude_models=(opus-4-7 opus-4-8 sonnet-4-6 haiku-4-6)
 grok_models=(grok-build)
+minimax_models=(minimax-m3)
 failures=0
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,7 +56,8 @@ if [[ -n "$health" ]] && jq -e '
   .chatgpt_subscription_passthrough == "proxy" and
   .capabilities.openai.codex_tools == "passthrough" and
   .capabilities.claude.codex_tools == "prompt_bridge_experimental" and
-  .capabilities.grok.codex_tools == "prompt_bridge_experimental"
+  .capabilities.grok.codex_tools == "prompt_bridge_experimental" and
+  .capabilities.minimax.codex_tools == "prompt_bridge_experimental"
 ' >/dev/null <<<"$health"; then
   pass "healthz capability matrix"
 else
@@ -64,7 +67,7 @@ fi
 catalog="$(curl -fsS "$gateway_url/v1/models" 2>/tmp/codex-gateway-models.err || true)"
 if [[ -n "$catalog" ]]; then
   missing=0
-  for slug in gpt-5.5 "${claude_models[@]}" "${grok_models[@]}"; do
+  for slug in gpt-5.5 "${claude_models[@]}" "${grok_models[@]}" "${minimax_models[@]}"; do
     if ! jq -e --arg slug "$slug" '.models[]? | select(.slug == $slug)' >/dev/null <<<"$catalog"; then
       fail "gateway catalog missing $slug"
       missing=1
@@ -74,7 +77,7 @@ if [[ -n "$catalog" ]]; then
     if jq -r '.models[]? | select(.slug|test("^(opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6)$")) | .display_name' <<<"$catalog" | rg -q '^claude-'; then
       fail "gateway catalog has claude-prefixed display name"
     else
-      pass "gateway catalog slugs, compact Claude display names, and Grok model name"
+      pass "gateway catalog slugs, compact Claude display names, Grok model name, and MiniMax model name"
     fi
   fi
 else
@@ -85,7 +88,7 @@ if command -v codex >/dev/null 2>&1; then
   debug_models="$(codex debug models -c model_provider='"model_gateway"' 2>/tmp/codex-debug-models.err | jq -r '.models[]?.slug' || true)"
   if printf '%s\n' "$debug_models" | rg -q "$models_re"; then
     missing=0
-    for slug in gpt-5.5 "${claude_models[@]}" "${grok_models[@]}"; do
+    for slug in gpt-5.5 "${claude_models[@]}" "${grok_models[@]}" "${minimax_models[@]}"; do
       if ! printf '%s\n' "$debug_models" | rg -qx "$slug"; then
         fail "codex debug models missing $slug"
         missing=1
@@ -156,6 +159,27 @@ if [[ "$run_grok" == "1" ]]; then
   done
 else
   note "skipping Grok live smoke"
+fi
+
+if [[ "$run_minimax" == "1" ]]; then
+  for model in "${minimax_models[@]}"; do
+    tag="OK_${model//-/_}"
+    payload="$(json_payload "$model" "只回 ${tag}。")"
+    out="$(curl --max-time 90 -sS -N "$gateway_url/v1/responses" \
+      -H 'content-type: application/json' \
+      -d "$payload" || true)"
+    if printf '%s\n' "$out" | rg -q 'response.failed|not authenticated|disabled by policy|quota|billing|error'; then
+      fail "MiniMax live smoke failed for $model: $(printf '%s\n' "$out" | tr '\n' ' ' | sed 's/  */ /g' | cut -c1-220)"
+    elif printf '%s\n' "$out" | rg -q "$tag" &&
+         printf '%s\n' "$out" | rg -q 'response.output_item.done' &&
+         printf '%s\n' "$out" | rg -q 'response.completed'; then
+      pass "MiniMax live smoke $model"
+    else
+      fail "MiniMax live smoke incomplete for $model"
+    fi
+  done
+else
+  note "skipping MiniMax live smoke (set RUN_MINIMAX_SMOKE=1)"
 fi
 
 if [[ "$run_claude" == "1" ]]; then

@@ -22,6 +22,12 @@ MODE="${1:-install}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PORT="${MODEL_GATEWAY_PORT:-4177}"
 HOST="${MODEL_GATEWAY_HOST:-127.0.0.1}"
+# Heavy workloads (ultrawork + 1M-context Claude) need long turns and SSE keepalive so
+# Codex App does not trip its stream-idle timeout. Overridable per machine.
+CLAUDE_TIMEOUT_MS="${CLAUDE_TIMEOUT_MS:-600000}"
+GROK_TIMEOUT_MS="${GROK_TIMEOUT_MS:-300000}"
+MINIMAX_TIMEOUT_MS="${MINIMAX_TIMEOUT_MS:-120000}"
+GATEWAY_HEARTBEAT_MS="${GATEWAY_HEARTBEAT_MS:-15000}"
 URL="http://$HOST:$PORT"
 USER_NAME="$(id -un)"
 LABEL="${GATEWAY_LABEL:-com.${USER_NAME}.codex-model-gateway}"
@@ -66,6 +72,12 @@ c_ok "node:   ${NODE_BIN}"
 NEED_CODEX_LOGIN=0; NEED_GROK_LOGIN=0
 CODEX_HOME_EFF="${CODEX_HOME:-$HOME/.codex}"
 [ -f "$CODEX_HOME_EFF/auth.json" ] && c_ok "codex auth present ($CODEX_HOME_EFF/auth.json)" || { c_warn "codex 未登入（$CODEX_HOME_EFF/auth.json 不存在）→ 需 'codex login'"; NEED_CODEX_LOGIN=1; }
+MINIMAX_SECRET_FILE="${MINIMAX_API_KEY_FILE:-$HOME/.codex/secrets/minimax.env}"
+if [ -f "$MINIMAX_SECRET_FILE" ]; then
+  c_ok "minimax key file present ($MINIMAX_SECRET_FILE)"
+else
+  c_warn "minimax key file 未偵測到 → minimax-m3 會出現在 catalog，但實際呼叫會 fail-closed。可建立 $MINIMAX_SECRET_FILE"
+fi
 if [ -n "$GROK_BIN" ]; then
   if "$GROK_BIN" models >/dev/null 2>&1 && ! "$GROK_BIN" models 2>&1 | grep -qi 'not authenticated'; then
     c_ok "grok authenticated"
@@ -94,6 +106,7 @@ if [ "$MODE" = "--preflight" ] || [ "$MODE" = "preflight" ]; then
   echo "== PREFLIGHT 摘要（未做任何更動）=="
   [ "$NEED_CODEX_LOGIN" = 1 ] && echo "  → 手動步驟：codex login"
   [ "$NEED_GROK_LOGIN" = 1 ]  && echo "  → 手動步驟：grok login --oauth"
+  [ ! -f "$MINIMAX_SECRET_FILE" ] && echo "  → 選用：建立 ~/.codex/secrets/minimax.env 供 minimax-m3 使用"
   [ "$NEED_CODEX_LOGIN" = 0 ] && [ "$NEED_GROK_LOGIN" = 0 ] && echo "  → 無待辦手動步驟，可直接跑安裝（不帶 --preflight）。"
   exit 0
 fi
@@ -120,8 +133,13 @@ mkdir -p "$HOME/Library/LaunchAgents"
     <key>PATH</key><string>${PLIST_PATH}</string>
     <key>MODEL_GATEWAY_HOST</key><string>${HOST}</string>
     <key>MODEL_GATEWAY_PORT</key><string>${PORT}</string>
-    <key>CLAUDE_TIMEOUT_MS</key><string>120000</string>
-    <key>GROK_TIMEOUT_MS</key><string>120000</string>
+    <key>CLAUDE_TIMEOUT_MS</key><string>${CLAUDE_TIMEOUT_MS}</string>
+    <key>GROK_TIMEOUT_MS</key><string>${GROK_TIMEOUT_MS}</string>
+    <key>MINIMAX_TIMEOUT_MS</key><string>${MINIMAX_TIMEOUT_MS}</string>
+    <key>GATEWAY_HEARTBEAT_MS</key><string>${GATEWAY_HEARTBEAT_MS}</string>
+    <key>MINIMAX_BASE_URL</key><string>https://api.minimax.io/v1</string>
+    <key>MINIMAX_API_KEY_FILE</key><string>${MINIMAX_SECRET_FILE}</string>
+    <key>GATEWAY_API_MODEL_ALLOWLIST</key><string>minimax-near-unlimited-api</string>
 PLIST_EOF
   [ -n "$CLAUDE_BIN" ] && printf '    <key>CLAUDE_COMMAND</key><string>%s</string>\n' "$CLAUDE_BIN"
   [ -n "$GROK_BIN" ]   && printf '    <key>GROK_COMMAND</key><string>%s</string>\n' "$GROK_BIN"

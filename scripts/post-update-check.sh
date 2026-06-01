@@ -21,7 +21,7 @@ if [ -z "$GW_DIR" ]; then
     [ -f "$c/server.js" ] && { GW_DIR="$(cd "$c" && pwd)"; break; }
   done
 fi
-EXPECT_SLUGS=(gpt-5.5 opus-4-7 opus-4-8 sonnet-4-6 haiku-4-6 grok-build)
+EXPECT_SLUGS=(gpt-5.5 opus-4-7 opus-4-8 sonnet-4-6 haiku-4-6 grok-build minimax-m3)
 
 full=0; [ "${1:-}" = "--full" ] && full=1
 fails=0
@@ -47,6 +47,11 @@ done
 echo "[2] gateway healthz（launchd 進程，App 更新殺不掉它）"
 if curl -fsS --max-time 6 "$GATEWAY_URL/healthz" >/tmp/puc_health.json 2>/dev/null; then
   [ "$(jq -r .ok /tmp/puc_health.json 2>/dev/null)" = "true" ] && pass "healthz ok ($(jq -r .provider /tmp/puc_health.json))" || warn "healthz ok!=true"
+  if [ "$(jq -r '.capabilities.minimax.spend_allowed // false' /tmp/puc_health.json 2>/dev/null)" = "true" ]; then
+    pass "MiniMax API route allowlisted"
+  else
+    note "MiniMax API route 未 allowlist；minimax-m3 會 fail-closed，設 GATEWAY_API_MODEL_ALLOWLIST=minimax-near-unlimited-api 後重啟 gateway"
+  fi
 else
   warn "gateway 連不上 $GATEWAY_URL"
   note "重啟：launchctl kickstart -k gui/\$(id -u)/$LABEL"
@@ -56,6 +61,12 @@ echo "[3] model catalog"
 if curl -fsS --max-time 6 "$GATEWAY_URL/v1/models" >/tmp/puc_models.json 2>/dev/null; then
   miss=""; for s in "${EXPECT_SLUGS[@]}"; do jq -e --arg s "$s" '.models[]?|select(.slug==$s)' /tmp/puc_models.json >/dev/null 2>&1 || miss="$miss $s"; done
   [ -z "$miss" ] && pass "expected slugs 齊全" || warn "catalog 缺:$miss"
+  # All-models-default-fast: every model should advertise default_reasoning_level "low"
+  # so the picker starts each model on the fast tier (the gateway-side replacement for
+  # the native fast toggle, which is provider-gated and absent on a custom provider).
+  notlow="$(jq -r '.models[]?|select((.default_reasoning_level//"")!="low")|.slug' /tmp/puc_models.json 2>/dev/null | tr '\n' ' ')"
+  [ -z "$notlow" ] && pass "全模型預設 fast（default_reasoning_level=low）" \
+    || warn "未預設 fast 的模型:$notlow（設 GATEWAY_DEFAULT_REASONING_LEVEL 或檢查 buildModelEntry）"
 else warn "/v1/models 連不上"; fi
 
 echo "[4] codex debug models（config 端到端接通）"

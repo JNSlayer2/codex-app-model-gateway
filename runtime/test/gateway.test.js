@@ -109,7 +109,7 @@ function parseSseEvents(text) {
     .map((line) => JSON.parse(line.slice("data: ".length)));
 }
 
-test("model catalog exposes GPT, Claude, and Grok slugs from the single gateway provider", async (t) => {
+test("model catalog exposes GPT, Claude, Grok, and MiniMax slugs from the single gateway provider", async (t) => {
   const gateway = await startGateway();
   t.after(async () => gateway.close());
 
@@ -117,11 +117,15 @@ test("model catalog exposes GPT, Claude, and Grok slugs from the single gateway 
   const slugs = catalog.models.map((model) => model.slug);
 
   assert.deepEqual(
-    ["gpt-5.5", "opus-4-7", "opus-4-8", "sonnet-4-6", "haiku-4-6", "grok-build"].every((slug) =>
+    ["gpt-5.5", "opus-4-7", "opus-4-8", "sonnet-4-6", "haiku-4-6", "grok-build", "minimax-m3"].every((slug) =>
       slugs.includes(slug),
     ),
     true,
   );
+  const minimax = catalog.models.find((model) => model.slug === "minimax-m3");
+  assert.equal(minimax.capabilities.backend, "minimax_api");
+  assert.equal(minimax.capabilities.api_spend, "minimax-near-unlimited-api");
+  assert.equal(minimax.context_window, 1000000);
 });
 
 test("healthz exposes deny-by-default API spend policy", async (t) => {
@@ -137,6 +141,8 @@ test("healthz exposes deny-by-default API spend policy", async (t) => {
     "minimax-near-unlimited-api",
   ]);
   assert.equal(health.capabilities.claude.backend, "claude_cli");
+  assert.equal(health.capabilities.minimax.backend, "minimax_api");
+  assert.equal(health.capabilities.minimax.spend_allowed, true);
 });
 
 test("GPT models are proxied to the ChatGPT Codex subscription endpoint", async (t) => {
@@ -491,6 +497,109 @@ test("Grok tool bridge tolerates prose-wrapped JSON tool intent", async (t) => {
   assert.equal(res.status, 200);
   assert.equal(functionCall.item.name, "computer_click");
   assert.deepEqual(JSON.parse(functionCall.item.arguments), { x: 10, y: 20 });
+  assert.ok(events.some((event) => event.type === "response.completed"));
+});
+
+test("MiniMax M3 text responses emit completed assistant messages", async (t) => {
+  const gateway = await startGateway({
+    GATEWAY_API_MODEL_ALLOWLIST: "minimax-near-unlimited-api",
+    MINIMAX_MOCK_RESPONSE_JSON: "OK_MINIMAX_VISIBLE_ASSISTANT",
+  });
+  t.after(async () => gateway.close());
+
+  const res = await fetch(`http://127.0.0.1:${gateway.port}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "minimax-m3",
+      input: "reply visibly",
+      stream: true,
+    }),
+  });
+
+  const events = parseSseEvents(await res.text());
+  const message = events.find((event) => event.item?.type === "message");
+  const completed = events.find((event) => event.type === "response.completed");
+
+  assert.equal(res.status, 200);
+  assert.equal(message.type, "response.output_item.done");
+  assert.equal(message.item.role, "assistant");
+  assert.equal(message.item.status, "completed");
+  assert.deepEqual(message.item.content, [{ type: "output_text", text: "OK_MINIMAX_VISIBLE_ASSISTANT" }]);
+  assert.equal(completed.response.model, "minimax-m3");
+});
+
+test("MiniMax M3 prompt bridge emits Codex function_call events without executing tools", async (t) => {
+  const gateway = await startGateway({
+    GATEWAY_API_MODEL_ALLOWLIST: "minimax-near-unlimited-api",
+    MINIMAX_MOCK_RESPONSE_JSON: JSON.stringify({
+      tool_calls: [
+        {
+          type: "function_call",
+          name: "exec_command",
+          arguments: { cmd: "pwd", yield_time_ms: 1000 },
+        },
+      ],
+    }),
+  });
+  t.after(async () => gateway.close());
+
+  const res = await fetch(`http://127.0.0.1:${gateway.port}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "minimax-m3",
+      input: "check cwd",
+      tools: [
+        {
+          type: "function",
+          name: "exec_command",
+          description: "Run a command in the Codex workspace.",
+          parameters: {
+            type: "object",
+            properties: { cmd: { type: "string" }, yield_time_ms: { type: "integer" } },
+            required: ["cmd"],
+          },
+        },
+      ],
+      stream: true,
+    }),
+  });
+
+  const events = parseSseEvents(await res.text());
+  const functionCall = events.find((event) => event.item?.type === "function_call");
+
+  assert.equal(res.status, 200);
+  assert.equal(functionCall.type, "response.output_item.done");
+  assert.equal(functionCall.item.name, "exec_command");
+  assert.deepEqual(JSON.parse(functionCall.item.arguments), {
+    cmd: "pwd",
+    yield_time_ms: 1000,
+  });
+  assert.ok(events.some((event) => event.type === "response.completed"));
+});
+
+test("MiniMax M3 API spend policy failures complete visibly instead of retrying", async (t) => {
+  const gateway = await startGateway({
+    MINIMAX_MOCK_ERROR_TEXT: "MiniMax API route is disabled by policy: minimax-near-unlimited-api is not in GATEWAY_API_MODEL_ALLOWLIST",
+  });
+  t.after(async () => gateway.close());
+
+  const res = await fetch(`http://127.0.0.1:${gateway.port}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "minimax-m3",
+      input: "reply visibly",
+      stream: true,
+    }),
+  });
+
+  const events = parseSseEvents(await res.text());
+  const message = events.find((event) => event.item?.type === "message");
+
+  assert.equal(res.status, 200);
+  assert.match(message.item.content[0].text, /disabled by policy/);
   assert.ok(events.some((event) => event.type === "response.completed"));
 });
 

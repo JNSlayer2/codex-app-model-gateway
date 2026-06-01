@@ -9,9 +9,18 @@ const fs = require("fs");
 const HOST = process.env.MODEL_GATEWAY_HOST || "127.0.0.1";
 const PORT = Number(process.env.MODEL_GATEWAY_PORT || 4177);
 const CLAUDE_TIMEOUT_MS = Number(process.env.CLAUDE_TIMEOUT_MS || 120000);
+const HEARTBEAT_MS = Number(process.env.GATEWAY_HEARTBEAT_MS || 15000);
+// Default reasoning level advertised for EVERY model in the picker. "low" = fast
+// daily default across all models (GPT actually speeds up; Claude/MiniMax/Grok are
+// already fast). Bump per-thread in the App when depth is needed, or set env to revert.
+const DEFAULT_REASONING_LEVEL = process.env.GATEWAY_DEFAULT_REASONING_LEVEL || "low";
+const UPSTREAM_TIMEOUT_MS = Number(process.env.GATEWAY_UPSTREAM_TIMEOUT_MS || 600000);
 const CLAUDE_COMMAND = process.env.CLAUDE_COMMAND || "claude";
 const GROK_TIMEOUT_MS = Number(process.env.GROK_TIMEOUT_MS || 120000);
 const GROK_COMMAND = process.env.GROK_COMMAND || "grok";
+const MINIMAX_TIMEOUT_MS = Number(process.env.MINIMAX_TIMEOUT_MS || 120000);
+const MINIMAX_BASE_URL = (process.env.MINIMAX_BASE_URL || "https://api.minimax.io/v1").replace(/\/+$/, "");
+const MINIMAX_API_SPEND_CLASS = process.env.MINIMAX_API_SPEND_CLASS || "minimax-near-unlimited-api";
 const MAX_CHILD_STDOUT = Number(process.env.MAX_CHILD_STDOUT_BYTES || 8 * 1024 * 1024);
 const CHATGPT_CODEX_BASE_URL =
   (process.env.CHATGPT_CODEX_BASE_URL || "https://chatgpt.com/backend-api/codex").replace(/\/+$/, "");
@@ -33,7 +42,9 @@ const claudeRoutes = {
   },
   "opus-4-8": {
     display_name: "opus4.8",
-    candidates: ["claude-opus-4-8", "opus-4-8", "opus"],
+    // 1M-context variant first: heavy ultrawork threads overflow the 200K default.
+    candidates: ["claude-opus-4-8[1m]", "claude-opus-4-8", "opus-4-8", "opus"],
+    context_window: 1000000,
   },
   "sonnet-4-6": {
     display_name: "sonnet4.6",
@@ -59,6 +70,15 @@ const grokRoutes = {
   },
 };
 
+const minimaxRoutes = {
+  "minimax-m3": {
+    display_name: "MiniMax M3",
+    candidates: ["MiniMax-M3"],
+    context_window: 1000000,
+    guaranteed_context_window: 512000,
+  },
+};
+
 function csvEnv(name) {
   return String(process.env[name] || "")
     .split(",")
@@ -79,6 +99,7 @@ const apiSpendPolicy = {
     openai: "chatgpt_subscription_passthrough_not_api_key",
     claude: "cli_subscription_not_api_key",
     grok: "cli_oauth_not_api_key",
+    minimax: `api_${MINIMAX_API_SPEND_CLASS}`,
   },
 };
 
@@ -119,6 +140,7 @@ function makeRouteState(routes) {
 
 const routeState = makeRouteState(claudeRoutes);
 const grokRouteState = makeRouteState(grokRoutes);
+const minimaxRouteState = makeRouteState(minimaxRoutes);
 
 function json(res, status, payload) {
   const body = JSON.stringify(payload, null, 2);
@@ -138,12 +160,14 @@ const MAX_BODY_BYTES = Number(process.env.GATEWAY_MAX_BODY_BYTES) || 64 * 1024 *
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = "";
+    let bytes = 0;
     let aborted = false;
     req.setEncoding("utf8");
     req.on("data", (chunk) => {
       if (aborted) return;
       data += chunk;
-      if (data.length > MAX_BODY_BYTES) {
+      bytes += Buffer.byteLength(chunk, "utf8"); // true byte count; .length is chars, not bytes
+      if (bytes > MAX_BODY_BYTES) {
         aborted = true;
         const err = new Error(`request body too large (> ${MAX_BODY_BYTES} bytes)`);
         err.statusCode = 413;
@@ -169,7 +193,7 @@ function buildModelEntry(slug, displayName, priority, o) {
     description: o.description,
     visibility: "list",
     supported_in_api: true,
-    default_reasoning_level: "medium",
+    default_reasoning_level: DEFAULT_REASONING_LEVEL,
     supported_reasoning_levels: reasoningLevels,
     shell_type: "shell_command",
     priority,
@@ -233,7 +257,7 @@ function modelsPayload() {
       support_verbosity: false,
       supports_parallel_tool_calls: false,
       supports_image_detail_original: false,
-      context_window: 200000,
+      context_window: route.context_window || 200000,
       input_modalities: ["text"],
       supports_search_tool: false,
       capabilities: {
@@ -272,7 +296,34 @@ function modelsPayload() {
       },
     }),
   );
-  const models = [...gptModels, ...claudeModels, ...grokModels];
+  const minimaxModels = Object.entries(minimaxRoutes).map(([slug, route], index) =>
+    buildModelEntry(slug, route.display_name, 35 - index, {
+      description:
+        "MiniMax M3 API backend via local Codex model_gateway. Tools use request-scoped prompt bridge; MiniMax never executes Codex tools directly.",
+      base_instructions:
+        "You are Codex, a coding agent running through a local MiniMax M3 model gateway. Answer directly and do not claim tool execution unless Codex supplies tool results.",
+      supports_reasoning_summaries: false,
+      default_reasoning_summary: "none",
+      support_verbosity: false,
+      supports_parallel_tool_calls: false,
+      supports_image_detail_original: false,
+      context_window: route.context_window,
+      input_modalities: ["text"],
+      supports_search_tool: false,
+      capabilities: {
+        text: "buffered",
+        streaming: "sse_after_backend_completion",
+        codex_tools: "prompt_bridge_experimental",
+        computer_use: "prompt_bridge_experimental_when_codex_exposes_tool_schema",
+        backend: "minimax_api",
+        backend_model: route.candidates[0],
+        api_spend: MINIMAX_API_SPEND_CLASS,
+        min_context_window: route.guaranteed_context_window,
+        isolation: "ephemeral_request_only",
+      },
+    }),
+  );
+  const models = [...gptModels, ...claudeModels, ...grokModels, ...minimaxModels];
   return { object: "list", data: models, models };
 }
 
@@ -311,6 +362,18 @@ function healthPayload() {
         backend: "grok_cli",
         isolation: "ephemeral_request_only",
       },
+      minimax: {
+        text: "buffered",
+        streaming: "sse_after_backend_completion",
+        codex_tools: "prompt_bridge_experimental",
+        computer_use: "prompt_bridge_experimental_when_codex_exposes_tool_schema",
+        backend: "minimax_api",
+        backend_model: "MiniMax-M3",
+        api_spend: MINIMAX_API_SPEND_CLASS,
+        spend_allowed: minimaxSpendAllowed(),
+        configured: Boolean(readMiniMaxApiKey()),
+        isolation: "ephemeral_request_only",
+      },
     },
     routes: {
       ...Object.fromEntries(
@@ -340,6 +403,19 @@ function healthPayload() {
             display_name: route.display_name,
             backend_candidates: route.candidates,
             ...publicRouteState(grokRouteState[slug]),
+          },
+        ]),
+      ),
+      ...Object.fromEntries(
+        Object.entries(minimaxRoutes).map(([slug, route]) => [
+          slug,
+          {
+            display_name: route.display_name,
+            backend_candidates: route.candidates,
+            api_spend: MINIMAX_API_SPEND_CLASS,
+            spend_allowed: minimaxSpendAllowed(),
+            configured: Boolean(readMiniMaxApiKey()),
+            ...publicRouteState(minimaxRouteState[slug]),
           },
         ]),
       ),
@@ -493,7 +569,7 @@ function isModelError(text) {
 
 function isBackendNoticeError(error) {
   const text = String(error?.message || "");
-  return /session limit|rate limit|rate_limit|resets|quota|usage limit|not authenticated|login|oauth|subscription/i.test(text);
+  return /session limit|rate limit|rate_limit|resets|quota|usage limit|disabled by policy|not authenticated|unauthorized|forbidden|invalid api key|api key|billing|credit|payment|login|oauth|subscription|401|403|429/i.test(text);
 }
 
 function backendNoticeText(model, error) {
@@ -504,6 +580,206 @@ function backendNoticeText(model, error) {
     `${model} backend is temporarily unavailable: ${message}`,
     "Codex model_gateway returned this as a completed assistant message so Codex App will not enter a retry loop.",
   ].join("\n");
+}
+
+function stripShellQuotes(value) {
+  const text = String(value || "").trim();
+  if ((text.startsWith("'") && text.endsWith("'")) || (text.startsWith('"') && text.endsWith('"'))) {
+    return text.slice(1, -1);
+  }
+  return text;
+}
+
+function readMiniMaxApiKey() {
+  if (process.env.MINIMAX_API_KEY) return process.env.MINIMAX_API_KEY.trim();
+  const file = process.env.MINIMAX_API_KEY_FILE;
+  if (!file) return "";
+  try {
+    const raw = fs.readFileSync(file, "utf8");
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const match = trimmed.match(/^(?:export\s+)?MINIMAX_API_KEY=(.*)$/);
+      if (match) return stripShellQuotes(match[1]).trim();
+    }
+    const fallback = raw.trim();
+    return fallback.startsWith("sk-") ? fallback : "";
+  } catch {
+    return "";
+  }
+}
+
+function minimaxSpendAllowed() {
+  const allowlist = new Set(apiSpendPolicy.active_api_model_allowlist);
+  return allowlist.has(MINIMAX_API_SPEND_CLASS) || allowlist.has("user-approved-api:minimax/MiniMax-M3");
+}
+
+function normalizeMiniMaxResponse(payload) {
+  if (typeof payload === "string") return payload.trim();
+  if (!payload || typeof payload !== "object") return "";
+  if (typeof payload.output_text === "string") return payload.output_text;
+  if (typeof payload.text === "string") return payload.text;
+  if (typeof payload.result === "string") return payload.result;
+  if (typeof payload.message === "string") return payload.message;
+  if (Array.isArray(payload.output)) {
+    const parts = [];
+    for (const item of payload.output) {
+      if (!item || typeof item !== "object") continue;
+      if (typeof item.text === "string") parts.push(item.text);
+      if (typeof item.output_text === "string") parts.push(item.output_text);
+      if (Array.isArray(item.content)) {
+        parts.push(contentText(item.content));
+      }
+    }
+    const joined = parts.filter(Boolean).join("\n").trim();
+    if (joined) return joined;
+  }
+  if (Array.isArray(payload.choices)) {
+    const choice = payload.choices[0];
+    const text = choice?.message?.content || choice?.text || choice?.delta?.content;
+    if (typeof text === "string") return text;
+  }
+  return JSON.stringify(payload);
+}
+
+async function runMiniMaxOnce(model, prompt) {
+  if (process.env.MINIMAX_MOCK_RESPONSE_JSON !== undefined) {
+    return {
+      ok: true,
+      model,
+      code: 0,
+      signal: null,
+      text: process.env.MINIMAX_MOCK_RESPONSE_JSON,
+      raw_error: "",
+      usage: null,
+    };
+  }
+  if (process.env.MINIMAX_MOCK_ERROR_TEXT !== undefined) {
+    return {
+      ok: false,
+      model,
+      code: 1,
+      signal: null,
+      text: "",
+      raw_error: process.env.MINIMAX_MOCK_ERROR_TEXT,
+      usage: null,
+    };
+  }
+  if (!minimaxSpendAllowed()) {
+    return {
+      ok: false,
+      model,
+      code: 1,
+      signal: null,
+      text: "",
+      raw_error: `MiniMax API route is disabled by policy: ${MINIMAX_API_SPEND_CLASS} is not in GATEWAY_API_MODEL_ALLOWLIST`,
+      usage: null,
+    };
+  }
+  const apiKey = readMiniMaxApiKey();
+  if (!apiKey) {
+    return {
+      ok: false,
+      model,
+      code: 1,
+      signal: null,
+      text: "",
+      raw_error: "MiniMax backend not authenticated: MINIMAX_API_KEY or MINIMAX_API_KEY_FILE is not configured",
+      usage: null,
+    };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), MINIMAX_TIMEOUT_MS);
+  timer.unref();
+  try {
+    const system = [
+      "You are being called by a local Codex model gateway.",
+      "Answer directly unless the request includes a Codex request-scoped tool bridge and a tool is necessary.",
+      "When using a bridged tool, return exactly one raw JSON object with tool_calls and no prose. Never execute Codex tools in MiniMax.",
+    ].join(" ");
+    const response = await fetch(`${MINIMAX_BASE_URL}/responses`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        input: `${system}\n\n${prompt}`,
+        stream: false,
+      }),
+      signal: controller.signal,
+    });
+    const responseText = await response.text();
+    let payload = null;
+    try {
+      payload = JSON.parse(responseText);
+    } catch {
+      payload = null;
+    }
+    if (!response.ok) {
+      const message =
+        payload?.error?.message || payload?.base_resp?.status_msg || payload?.message || responseText.slice(0, 500);
+      return {
+        ok: false,
+        model,
+        code: response.status,
+        signal: null,
+        text: "",
+        raw_error: `MiniMax API error ${response.status}: ${message}`,
+        usage: payload?.usage || null,
+      };
+    }
+    return {
+      ok: true,
+      model,
+      code: response.status,
+      signal: null,
+      text: normalizeMiniMaxResponse(payload ?? responseText),
+      raw_error: "",
+      usage: payload?.usage || null,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      model,
+      code: null,
+      signal: error.name === "AbortError" ? "timeout" : null,
+      text: "",
+      raw_error: error.name === "AbortError" ? `MiniMax API timed out after ${MINIMAX_TIMEOUT_MS}ms` : `MiniMax API request failed: ${error.message}`,
+      usage: null,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function runMiniMax(slug, prompt) {
+  const route = minimaxRoutes[slug];
+  if (!route) {
+    throw Object.assign(new Error(`unknown model slug: ${slug}`), { status: 404 });
+  }
+  const preferred = minimaxRouteState[slug].backend_model;
+  const candidates = [preferred, ...route.candidates].filter((model, index, arr) => model && arr.indexOf(model) === index);
+  let last = null;
+  for (const model of candidates) {
+    minimaxRouteState[slug].attempts += 1;
+    const result = await runMiniMaxOnce(model, prompt);
+    last = result;
+    if (result.ok) {
+      minimaxRouteState[slug].backend_model = model;
+      minimaxRouteState[slug].last_ok_at = new Date().toISOString();
+      minimaxRouteState[slug].last_error = null;
+      return result;
+    }
+    minimaxRouteState[slug].last_error = result.raw_error || `minimax exited ${result.code}`;
+    if (!isModelError(minimaxRouteState[slug].last_error)) break;
+  }
+  const err = new Error(last?.raw_error || "MiniMax backend failed");
+  err.status = last?.code === 401 || last?.code === 403 ? last.code : 502;
+  err.backend = last;
+  throw err;
 }
 
 function runClaudeOnce(model, prompt) {
@@ -1106,14 +1382,26 @@ async function proxyChatgpt(req, res, bodyText, stream) {
     return res.end();
   }
 
+  // Abort the upstream ChatGPT request on timeout or if the client disconnects, so a
+  // stuck/abandoned passthrough never holds a connection or keeps reading the stream.
+  const controller = new AbortController();
+  const upstreamTimer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+  const onClientGone = () => controller.abort();
+  res.on("close", onClientGone);
+  const cleanup = () => {
+    clearTimeout(upstreamTimer);
+    res.off("close", onClientGone);
+  };
   let upstream;
   try {
     upstream = await fetch(`${CHATGPT_CODEX_BASE_URL}/responses`, {
       method: "POST",
       headers: passthroughHeaders(req),
       body: bodyText,
+      signal: controller.signal,
     });
   } catch (error) {
+    cleanup();
     const message = `GPT subscription passthrough failed before upstream response: ${error.message}`;
     if (!stream) return json(res, 502, { error: { message } });
     res.writeHead(200, {
@@ -1128,6 +1416,7 @@ async function proxyChatgpt(req, res, bodyText, stream) {
   copyResponseHeaders(upstream, res);
   res.statusCode = upstream.status;
   if (!upstream.body) {
+    cleanup();
     const text = await upstream.text();
     return res.end(text);
   }
@@ -1136,9 +1425,12 @@ async function proxyChatgpt(req, res, bodyText, stream) {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      if (res.writableEnded) break; // client disconnected — stop draining upstream
       res.write(Buffer.from(value));
     }
   } finally {
+    cleanup();
+    try { await reader.cancel(); } catch {}
     res.end();
   }
 }
@@ -1157,7 +1449,7 @@ async function handleResponses(req, res) {
   const stream = body.stream === true;
   const prompt = extractPrompt(body);
   const toolSpecs = extractToolSpecs(body);
-  const routeKind = claudeRoutes[routeModel] ? "claude" : grokRoutes[model] ? "grok" : null;
+  const routeKind = claudeRoutes[routeModel] ? "claude" : grokRoutes[model] ? "grok" : minimaxRoutes[model] ? "minimax" : null;
   if (!routeKind) {
     if (isOfficialOpenAiSlug(model)) {
       return proxyChatgpt(req, res, bodyText, stream);
@@ -1183,8 +1475,25 @@ async function handleResponses(req, res) {
       connection: "keep-alive",
     });
   }
+  // Buffered backends (claude/grok CLI) send nothing until the turn completes; a long
+  // 1M-context turn would otherwise look idle and trip Codex App's stream timeout. Emit
+  // SSE comment keepalives during the await so the connection stays visibly alive.
+  let heartbeat = null;
+  if (stream) {
+    heartbeat = setInterval(() => {
+      try {
+        if (!res.writableEnded) res.write(`: keepalive ${routeKind || "backend"}\n\n`);
+      } catch {}
+    }, HEARTBEAT_MS);
+    if (typeof heartbeat.unref === "function") heartbeat.unref();
+  }
   try {
-    const result = routeKind === "claude" ? await runClaude(routeModel, prompt) : await runGrok(model, prompt);
+    const result =
+      routeKind === "claude"
+        ? await runClaude(routeModel, prompt)
+        : routeKind === "grok"
+          ? await runGrok(model, prompt)
+          : await runMiniMax(model, prompt);
     const toolCalls = toolSpecs.length > 0 ? extractRequestedToolCalls(result.text || "", toolSpecs) : null;
     if (toolCalls) {
       const { response, output } = toolCallResponseObjects(toolCalls, model);
@@ -1229,6 +1538,8 @@ async function handleResponses(req, res) {
     if (!stream) return json(res, error.status || 500, { error: payload.error });
     sse(res, payload);
     res.end();
+  } finally {
+    if (heartbeat) clearInterval(heartbeat);
   }
 }
 
