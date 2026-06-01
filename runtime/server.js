@@ -202,7 +202,7 @@ function buildModelEntry(slug, displayName, priority, o) {
     availability_nux: null,
     upgrade: null,
     base_instructions: o.base_instructions,
-    model_messages: {},
+    model_messages: { instructions_template: null, instructions_variables: null },
     supports_reasoning_summaries: o.supports_reasoning_summaries,
     default_reasoning_summary: o.default_reasoning_summary,
     support_verbosity: o.support_verbosity,
@@ -215,6 +215,12 @@ function buildModelEntry(slug, displayName, priority, o) {
     context_window: o.context_window,
     max_context_window: o.context_window,
     effective_context_window_percent: 90,
+    // Auto-compact before the effective window fills. Custom providers don't get the
+    // App's native default, so advertise it explicitly (~60% of window) per model.
+    // NOTE: the catalog value is advisory; the decisive setting is the user's config
+    // model_auto_compact_token_limit + model_auto_compact_token_limit_scope="total"
+    // (default scope ignores the cached prefix, so heavy caching never trips it).
+    auto_compact_token_limit: Math.floor((o.context_window || 200000) * 0.6),
     experimental_supported_tools: [],
     input_modalities: o.input_modalities,
     supports_search_tool: o.supports_search_tool,

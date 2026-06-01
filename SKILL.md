@@ -83,6 +83,26 @@ gateway 端的等效做法：**讓每個模型在選單裡預設停在 fast（�
 
 搭配 `~/.codex/config.toml` 的 `model_reasoning_effort = "low"` + `service_tier = "fast"`（兩個 config home 都要），即「全模型日常預設 fast」。改完需**完全重開 Codex App**，舊 thread 仍記舊檔。`post-update-check.sh` 已納入此檢查項（全模型 `default_reasoning_level=low`）。
 
+## 自動壓縮（auto-compaction）在自訂 provider 下的修法
+
+症狀：Codex App 用 `model_gateway` provider 時長 thread **不自動壓縮、直接撞窗口上限 OOM**（`ran out of room in the model's context window`）。
+
+關鍵成因（非 provider 硬擋，是 config 的 scope 算錯）：`model_auto_compact_token_limit_scope` 預設是 `body_after_prefix`，**只計「carried prefix 之後的新增」**；在高快取（cached prefix 很大）情況下，被計入的 token 永遠到不了門檻 → 壓縮永不觸發，但 total context 一路長到撞牆。
+
+修法（純原生設定，不是 gateway hack）— `~/.codex/config.toml`：
+
+```toml
+model_auto_compact_token_limit = 200000
+model_auto_compact_token_limit_scope = "total"   # 整個 active context 計入門檻（關鍵）
+```
+
+- 壓縮本身是 **Codex App + 上游模型原生功能**（codex 內建 `remote compaction`、`context_compacted` 事件）。
+- **GPT 路徑完全原生**：gateway 對 OpenAI-family slug 是逐位元 verbatim 轉發（body + headers），App 的原生壓縮請求/回應**原封穿透到 ChatGPT**，gateway 不參與壓縮。
+- catalog 另以 `auto_compact_token_limit`（per-model，約 window 60%）做 advisory；但**決定性的是上面 config 的 scope=total**。
+- 改完需**完全重開 Codex App**；舊 thread 不回溯。
+- 非 passthrough backend（claude/minimax/grok）要原生壓縮需 gateway 回 compaction-shaped output（未實作；GPT 已 native-complete，優先）。
+- 驗證：跑到門檻後讀 rollout 找 `context_compacted` / `compaction` 事件。
+
 ## 架構
 
 Codex config 只需要一個 provider：
