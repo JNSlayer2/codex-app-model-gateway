@@ -330,10 +330,11 @@ test("Claude text responses emit completed assistant message items for Codex App
   });
 
   const events = parseSseEvents(await res.text());
-  const message = events.find((event) => event.item?.type === "message");
+  // Streaming may legitimately emit output_item.added first; persistence requires
+  // a COMPLETED assistant message item, so select the done event specifically.
+  const message = events.find((event) => event.type === "response.output_item.done" && event.item?.type === "message");
 
   assert.equal(res.status, 200);
-  assert.equal(message.type, "response.output_item.done");
   assert.equal(message.item.role, "assistant");
   assert.equal(message.item.status, "completed");
   assert.deepEqual(message.item.content, [{ type: "output_text", text: "OK_VISIBLE_ASSISTANT" }]);
@@ -800,4 +801,124 @@ test("external models fail closed when they request a tool not exposed in the cu
   assert.equal(fabricated, undefined);
   assert.match(failed.error.message, /not exposed in this Codex request/);
   assert.equal(failed.error.status, 502);
+});
+
+test("Claude streaming emits ordered delta events with consistent ids and usage", async (t) => {
+  const streamJsonl = [
+    JSON.stringify({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "thinking_delta", thinking: "hidden" } } }),
+    JSON.stringify({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "OK_" } } }),
+    JSON.stringify({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "STREAM" } } }),
+    JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "OK_STREAM", usage: { input_tokens: 10, cache_read_input_tokens: 5, output_tokens: 7 } }),
+  ].join("\n");
+  const gateway = await startGateway({ CLAUDE_MOCK_STREAM_JSONL: streamJsonl });
+  t.after(async () => gateway.close());
+
+  const res = await fetch(`http://127.0.0.1:${gateway.port}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "opus-4-8",
+      stream: true,
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+    }),
+  });
+  const events = parseSseEvents(await res.text());
+  const types = events.map((event) => event.type);
+  const expectedOrder = [
+    "response.created",
+    "response.output_item.added",
+    "response.content_part.added",
+    "response.output_text.delta",
+    "response.output_text.done",
+    "response.content_part.done",
+    "response.output_item.done",
+    "response.completed",
+  ];
+  let cursor = -1;
+  for (const expected of expectedOrder) {
+    const index = types.indexOf(expected, cursor + 1);
+    assert.ok(index > cursor, `missing or out-of-order event: ${expected} in ${types.join(",")}`);
+    cursor = index;
+  }
+  const deltas = events.filter((event) => event.type === "response.output_text.delta");
+  assert.equal(deltas.map((event) => event.delta).join(""), "OK_STREAM");
+  assert.ok(!deltas.some((event) => event.delta.includes("hidden")), "thinking deltas must never stream out");
+  const itemId = events.find((event) => event.type === "response.output_item.added").item.id;
+  for (const event of deltas) assert.equal(event.item_id, itemId);
+  const completed = events.find((event) => event.type === "response.completed");
+  assert.equal(completed.response.output_text, "OK_STREAM");
+  assert.equal(completed.response.output[0].id, itemId);
+  assert.equal(completed.response.usage.input_tokens, 15);
+  assert.equal(completed.response.usage.total_tokens, 22);
+  assert.equal(completed.response.usage.input_tokens_details.cached_tokens, 5);
+});
+
+test("Claude streaming kill switch falls back to the buffered path", async (t) => {
+  const gateway = await startGateway({
+    CLAUDE_STREAMING: "0",
+    CLAUDE_MOCK_RESPONSE_JSON: "OK_BUFFERED",
+  });
+  t.after(async () => gateway.close());
+
+  const res = await fetch(`http://127.0.0.1:${gateway.port}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "opus-4-8",
+      stream: true,
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+    }),
+  });
+  const events = parseSseEvents(await res.text());
+  assert.ok(!events.some((event) => event.type === "response.output_text.delta"));
+  const completed = events.find((event) => event.type === "response.completed");
+  assert.equal(completed.response.output_text, "OK_BUFFERED");
+});
+
+test("Claude buffered responses propagate normalized usage for token accounting", async (t) => {
+  const gateway = await startGateway({
+    CLAUDE_STREAMING: "0",
+    CLAUDE_MOCK_RESPONSE_JSON: "OK_USAGE",
+    CLAUDE_MOCK_USAGE_JSON: JSON.stringify({ input_tokens: 100, cache_read_input_tokens: 40, cache_creation_input_tokens: 10, output_tokens: 25 }),
+  });
+  t.after(async () => gateway.close());
+
+  const res = await fetch(`http://127.0.0.1:${gateway.port}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "sonnet-4-6",
+      stream: false,
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+    }),
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.usage.input_tokens, 150);
+  assert.equal(body.usage.output_tokens, 25);
+  assert.equal(body.usage.total_tokens, 175);
+  assert.equal(body.usage.input_tokens_details.cached_tokens, 40);
+});
+
+test("healthz exposes a coarse error_kind without leaking error text", async (t) => {
+  const gateway = await startGateway({
+    CLAUDE_MOCK_ERROR_TEXT: "Your authentication token has been invalidated. Please try signing in again.",
+  });
+  t.after(async () => gateway.close());
+
+  await fetch(`http://127.0.0.1:${gateway.port}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "haiku-4-6",
+      stream: false,
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+    }),
+  });
+  const health = await requestJson(`http://127.0.0.1:${gateway.port}/healthz`);
+  const route = health.routes["haiku-4-6"];
+  assert.equal(route.has_error, true);
+  assert.equal(route.error_kind, "auth");
+  assert.ok(route.last_error_at);
+  assert.ok(!JSON.stringify(route).includes("invalidated"), "raw error text must not leak");
 });

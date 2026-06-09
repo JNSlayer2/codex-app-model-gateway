@@ -119,14 +119,49 @@ const reasoningLevels = [
 const gptBaseInstructions =
   "You are Codex, a coding agent based on GPT-5. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled.";
 
+// Classify backend failures into a small, leak-free taxonomy for /healthz.
+// Order matters: auth before quota (e.g. "usage limit" wording near login hints),
+// spawn before network (ENOENT is a local exec problem, not connectivity).
+function classifyErrorKind(text, signal) {
+  const s = String(text || "");
+  if (signal === "SIGTERM" || signal === "SIGKILL" || /timed? ?out|timeout/i.test(s)) return "timeout";
+  if (/failed to start|spawn .*ENOENT|ENOENT|EACCES/i.test(s)) return "spawn";
+  if (/stdout exceeded|output.*exceeded.*bytes/i.test(s)) return "output_cap";
+  if (/not authenticated|unauthorized|invalidated|forbidden|invalid api key|login|oauth|\b401\b|\b403\b/i.test(s)) return "auth";
+  if (/rate limit|rate_limit|quota|usage limit|session limit|resets|billing|credit|payment|\b429\b/i.test(s)) return "quota";
+  if (/invalid model|unknown model|model .*not|not available|unsupported model/i.test(s)) return "model";
+  if (/ECONN|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|socket|fetch failed|network/i.test(s)) return "network";
+  if (/empty output|JSON|parse/i.test(s)) return "parse";
+  return "unknown";
+}
+
+function recordRouteOk(state, model) {
+  state.backend_model = model;
+  state.last_ok_at = new Date().toISOString();
+  state.last_error = null;
+  state.last_error_kind = null;
+  state.candidate_hits[model] = (state.candidate_hits[model] || 0) + 1;
+}
+
+function recordRouteError(state, rawError, signal) {
+  state.last_error = rawError;
+  state.last_error_kind = classifyErrorKind(rawError, signal);
+  state.last_error_at = new Date().toISOString();
+}
+
 function publicRouteState(s) {
   // Sanitized view for /healthz: never expose last_error text, which can contain
-  // CLI stderr or prompt fragments. Report only a boolean.
+  // CLI stderr or prompt fragments. Report only a boolean plus a coarse kind so
+  // operators can tell auth/quota/timeout/network apart without reading logs.
+  // candidate_hits resets on gateway restart (diagnostic, not a persistent stat).
   return {
     backend_model: s.backend_model,
     last_ok_at: s.last_ok_at,
     attempts: s.attempts,
     has_error: Boolean(s.last_error),
+    error_kind: s.last_error ? s.last_error_kind || "unknown" : null,
+    last_error_at: s.last_error ? s.last_error_at : null,
+    candidate_hits: s.candidate_hits,
   };
 }
 
@@ -138,6 +173,9 @@ function makeRouteState(routes) {
         backend_model: route.candidates[0],
         last_ok_at: null,
         last_error: null,
+        last_error_kind: null,
+        last_error_at: null,
+        candidate_hits: {},
         attempts: 0,
       },
     ]),
@@ -167,6 +205,11 @@ const MAX_BODY_BYTES = (() => {
   // `bytes > MAX_BODY_BYTES` always true, rejecting every request with 413.
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 64 * 1024 * 1024;
 })();
+
+// Claude true streaming kill switch (text-only turns stream incremental deltas;
+// tool-bridge turns always stay buffered). Set CLAUDE_STREAMING=0 to force the
+// fully buffered legacy behavior.
+const CLAUDE_STREAMING = process.env.CLAUDE_STREAMING !== "0";
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -278,8 +321,10 @@ function modelsPayload() {
       input_modalities: ["text"],
       supports_search_tool: false,
       capabilities: {
-        text: "buffered",
-        streaming: "sse_after_backend_completion",
+        text: CLAUDE_STREAMING ? "streaming" : "buffered",
+        streaming: CLAUDE_STREAMING
+          ? "incremental_deltas_for_text_turns_buffered_for_tool_bridge"
+          : "sse_after_backend_completion",
         codex_tools: "prompt_bridge_experimental",
         computer_use: "prompt_bridge_experimental_when_codex_exposes_tool_schema",
         backend: "claude_cli",
@@ -364,8 +409,10 @@ function healthPayload() {
         backend: "chatgpt_subscription",
       },
       claude: {
-        text: "buffered",
-        streaming: "sse_after_backend_completion",
+        text: CLAUDE_STREAMING ? "streaming" : "buffered",
+        streaming: CLAUDE_STREAMING
+          ? "incremental_deltas_for_text_turns_buffered_for_tool_bridge"
+          : "sse_after_backend_completion",
         codex_tools: "prompt_bridge_experimental",
         computer_use: "prompt_bridge_experimental_when_codex_exposes_tool_schema",
         backend: "claude_cli",
@@ -785,12 +832,10 @@ async function runMiniMax(slug, prompt) {
     const result = await runMiniMaxOnce(model, prompt);
     last = result;
     if (result.ok) {
-      minimaxRouteState[slug].backend_model = model;
-      minimaxRouteState[slug].last_ok_at = new Date().toISOString();
-      minimaxRouteState[slug].last_error = null;
+      recordRouteOk(minimaxRouteState[slug], model);
       return result;
     }
-    minimaxRouteState[slug].last_error = result.raw_error || `minimax exited ${result.code}`;
+    recordRouteError(minimaxRouteState[slug], result.raw_error || `minimax exited ${result.code}`, result.signal);
     if (!isModelError(minimaxRouteState[slug].last_error)) break;
   }
   const err = new Error(last?.raw_error || "MiniMax backend failed");
@@ -825,6 +870,8 @@ function runClaudeOnce(model, prompt) {
       return;
     }
     if (process.env.CLAUDE_MOCK_RESPONSE_JSON !== undefined) {
+      let mockUsage = null;
+      try { mockUsage = JSON.parse(process.env.CLAUDE_MOCK_USAGE_JSON || "null"); } catch {}
       resolveMock({
         ok: true,
         model,
@@ -832,7 +879,7 @@ function runClaudeOnce(model, prompt) {
         signal: null,
         text: process.env.CLAUDE_MOCK_RESPONSE_JSON,
         raw_error: "",
-        usage: null,
+        usage: mockUsage,
       });
       return;
     }
@@ -930,18 +977,169 @@ async function runClaude(slug, prompt) {
     const result = await runClaudeOnce(model, prompt);
     last = result;
     if (result.ok) {
-      routeState[canonicalSlug].backend_model = model;
-      routeState[canonicalSlug].last_ok_at = new Date().toISOString();
-      routeState[canonicalSlug].last_error = null;
+      recordRouteOk(routeState[canonicalSlug], model);
       return result;
     }
-    routeState[canonicalSlug].last_error = result.raw_error || `claude exited ${result.code}`;
+    recordRouteError(routeState[canonicalSlug], result.raw_error || `claude exited ${result.code}`, result.signal);
     if (!isModelError(routeState[canonicalSlug].last_error)) break;
   }
   const err = new Error(last?.raw_error || "Claude backend failed");
   err.status = 502;
   err.backend = last;
   throw err;
+}
+
+// ---- Claude true streaming (text-only turns) -------------------------------
+// Tool-bridge turns stay buffered: a streamed tool-intent JSON would leak to the
+// user as visible text before the gateway can convert it to a function_call.
+// (CLAUDE_STREAMING is declared near the top with the other env constants.)
+
+function claudeStreamArgs(model, prompt) {
+  // Same hardened flags as claudeArgs, but stream-json with partial deltas.
+  // --verbose is required by the claude CLI for stream-json in -p mode.
+  const args = claudeArgs(model, prompt);
+  const i = args.indexOf("--output-format");
+  args[i + 1] = "stream-json";
+  args.splice(i + 2, 0, "--include-partial-messages", "--verbose");
+  return args;
+}
+
+function runClaudeStreamingOnce(model, prompt, onDelta) {
+  // Buffered-mock delegation keeps the existing test/mocking surface working:
+  // the handler emits the full text as a single delta when none were streamed.
+  if (
+    process.env.CLAUDE_MOCK_STREAM_JSONL === undefined &&
+    (process.env.CLAUDE_MOCK_RESPONSE_JSON !== undefined || process.env.CLAUDE_MOCK_ERROR_TEXT !== undefined)
+  ) {
+    return runClaudeOnce(model, prompt).then((result) => ({ ...result, accumulated: "" }));
+  }
+  return new Promise((resolve) => {
+    let acc = "";
+    let finalEvent = null;
+    const handleLine = (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      let obj = null;
+      try { obj = JSON.parse(trimmed); } catch { return; }
+      if (obj.type === "stream_event") {
+        const ev = obj.event || {};
+        // thinking_delta and other block types are internal — never streamed out.
+        if (ev.type === "content_block_delta" && ev.delta?.type === "text_delta" && typeof ev.delta.text === "string") {
+          acc += ev.delta.text;
+          onDelta(ev.delta.text);
+        }
+        return;
+      }
+      if (obj.type === "result") finalEvent = obj;
+    };
+    const finalize = (code, signal, rawTail) => {
+      // The result event's full text is authoritative; accumulated deltas are the
+      // fallback for older CLIs without --include-partial-messages support.
+      const text = typeof finalEvent?.result === "string" && finalEvent.result ? finalEvent.result : acc;
+      const isError = Boolean(finalEvent?.is_error) || code !== 0 || Boolean(signal) || (!text && !finalEvent);
+      resolve({
+        ok: !isError,
+        model,
+        code,
+        signal,
+        text,
+        accumulated: acc,
+        raw_error: isError
+          ? [rawTail, finalEvent?.result || "", !finalEvent ? "claude stream produced no result event" : ""]
+              .filter(Boolean)
+              .join("\n")
+              .trim()
+          : "",
+        usage: finalEvent?.usage || null,
+      });
+    };
+    if (process.env.CLAUDE_MOCK_STREAM_JSONL !== undefined) {
+      if (process.env.CLAUDE_MOCK_PROMPT_FILE) fs.writeFileSync(process.env.CLAUDE_MOCK_PROMPT_FILE, prompt);
+      for (const line of String(process.env.CLAUDE_MOCK_STREAM_JSONL).split("\n")) handleLine(line);
+      finalize(0, null, "");
+      return;
+    }
+    const child = spawn(CLAUDE_COMMAND, claudeStreamArgs(model, prompt), {
+      cwd: "/tmp",
+      env: { ...process.env },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    let buffer = "";
+    let bytes = 0;
+    let settled = false;
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), 2000).unref();
+    }, CLAUDE_TIMEOUT_MS);
+    timer.unref();
+    const finish = (code, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (buffer) handleLine(buffer);
+      finalize(code, signal, stderr);
+    };
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      bytes += chunk.length;
+      if (bytes > MAX_CHILD_STDOUT) {
+        stderr += `\nclaude CLI stdout exceeded ${MAX_CHILD_STDOUT} bytes; aborted`;
+        finish(null, "SIGKILL");
+        child.kill("SIGKILL");
+        return;
+      }
+      buffer += chunk;
+      let nl;
+      while ((nl = buffer.indexOf("\n")) >= 0) {
+        handleLine(buffer.slice(0, nl));
+        buffer = buffer.slice(nl + 1);
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      if (stderr.length < MAX_CHILD_STDOUT) stderr += chunk;
+    });
+    child.on("error", (error) => {
+      stderr += `\nfailed to start claude CLI (${CLAUDE_COMMAND}): ${error.message}`;
+      finish(null, null);
+    });
+    child.on("close", (code, signal) => finish(code, signal));
+  });
+}
+
+async function runClaudeStreaming(slug, prompt, onDelta) {
+  const canonicalSlug = claudeAliases[slug] || slug;
+  const route = claudeRoutes[canonicalSlug];
+  if (!route) {
+    throw Object.assign(new Error(`unknown model slug: ${slug}`), { status: 404 });
+  }
+  const preferred = routeState[canonicalSlug].backend_model;
+  const candidates = [preferred, ...route.candidates].filter(
+    (model, index, arr) => model && arr.indexOf(model) === index,
+  );
+  let last = null;
+  for (const model of candidates) {
+    routeState[canonicalSlug].attempts += 1;
+    let deltasSent = false;
+    const wrapped = (delta) => {
+      deltasSent = true;
+      onDelta(delta);
+    };
+    const result = await runClaudeStreamingOnce(model, prompt, wrapped);
+    result.deltasSent = deltasSent;
+    last = result;
+    if (result.ok) {
+      recordRouteOk(routeState[canonicalSlug], model);
+      return result;
+    }
+    recordRouteError(routeState[canonicalSlug], result.raw_error || `claude exited ${result.code}`, result.signal);
+    // Once any delta reached the client we are committed to this candidate:
+    // switching mid-stream would duplicate visible text.
+    if (deltasSent) return result;
+    if (!isModelError(routeState[canonicalSlug].last_error)) break;
+  }
+  return last;
 }
 
 
@@ -1076,12 +1274,10 @@ async function runGrok(slug, prompt) {
     const result = await runGrokOnce(model, prompt);
     last = result;
     if (result.ok) {
-      grokRouteState[slug].backend_model = model;
-      grokRouteState[slug].last_ok_at = new Date().toISOString();
-      grokRouteState[slug].last_error = null;
+      recordRouteOk(grokRouteState[slug], model);
       return result;
     }
-    grokRouteState[slug].last_error = result.raw_error || `grok exited ${result.code}`;
+    recordRouteError(grokRouteState[slug], result.raw_error || `grok exited ${result.code}`, result.signal);
     if (!isModelError(grokRouteState[slug].last_error)) break;
   }
   const err = new Error(last?.raw_error || "Grok backend failed");
@@ -1175,9 +1371,30 @@ function sse(res, event) {
   res.write(`data: ${JSON.stringify(event)}\n\n`);
 }
 
+// Normalize backend usage payloads (Claude CLI / OpenAI-style) into Responses
+// `usage`. Token accounting is what lets Codex App track context growth for
+// auto-compaction on non-passthrough routes; without it the App is blind.
+// Claude reports cache tokens separately — they ARE part of the live context,
+// so they count toward input_tokens (cache_read surfaced as cached_tokens).
+function normalizeUsage(u) {
+  if (!u || typeof u !== "object") return null;
+  const cacheRead = Number(u.cache_read_input_tokens) || 0;
+  const cacheCreate = Number(u.cache_creation_input_tokens) || 0;
+  const input = (Number(u.input_tokens) || Number(u.prompt_tokens) || 0) + cacheRead + cacheCreate;
+  const output = Number(u.output_tokens) || Number(u.completion_tokens) || 0;
+  if (!input && !output) return null;
+  return {
+    input_tokens: input,
+    input_tokens_details: { cached_tokens: cacheRead },
+    output_tokens: output,
+    output_tokens_details: { reasoning_tokens: 0 },
+    total_tokens: input + output,
+  };
+}
+
 function responseObjects(text, model, options = {}) {
   const id = options.id || `resp_${crypto.randomBytes(12).toString("hex")}`;
-  const itemId = `msg_${crypto.randomBytes(12).toString("hex")}`;
+  const itemId = options.item_id || `msg_${crypto.randomBytes(12).toString("hex")}`;
   const created = options.created_at || Math.floor(Date.now() / 1000);
   const output = [
     {
@@ -1197,6 +1414,8 @@ function responseObjects(text, model, options = {}) {
     output,
     output_text: text,
   };
+  const usage = normalizeUsage(options.usage);
+  if (usage) response.usage = usage;
   return { id, itemId, response, output };
 }
 
@@ -1556,6 +1775,81 @@ async function handleResponses(req, res) {
     if (typeof heartbeat.unref === "function") heartbeat.unref();
   }
   try {
+    // True streaming path: text-only Claude turns stream deltas as they arrive.
+    // Tool-bridge / computer-use turns stay buffered (intent JSON must not leak
+    // as visible text); CLAUDE_STREAMING=0 is the kill switch back to buffered.
+    if (
+      routeKind === "claude" &&
+      stream &&
+      CLAUDE_STREAMING &&
+      toolSpecs.length === 0 &&
+      !isComputerUseRequest(prompt)
+    ) {
+      const itemId = `msg_${crypto.randomBytes(12).toString("hex")}`;
+      let started = false;
+      const emitDelta = (delta) => {
+        if (res.writableEnded) return;
+        if (!started) {
+          started = true;
+          sse(res, {
+            type: "response.output_item.added",
+            output_index: 0,
+            item: { id: itemId, type: "message", status: "in_progress", role: "assistant", content: [] },
+          });
+          sse(res, {
+            type: "response.content_part.added",
+            item_id: itemId,
+            output_index: 0,
+            content_index: 0,
+            part: { type: "output_text", text: "", annotations: [] },
+          });
+        }
+        sse(res, {
+          type: "response.output_text.delta",
+          item_id: itemId,
+          output_index: 0,
+          content_index: 0,
+          delta,
+          logprobs: [],
+        });
+      };
+      const result = await runClaudeStreaming(routeModel, prompt, emitDelta);
+      if (!result?.ok && !result?.deltasSent) {
+        // Nothing visible was sent yet — reuse the buffered error semantics
+        // (backend-notice completed message or response.failed) via the catch.
+        const err = new Error(result?.raw_error || "Claude backend failed");
+        err.status = 502;
+        throw err;
+      }
+      let finalText = result.text || result.accumulated || "";
+      if (!result.ok && result.deltasSent) {
+        // Committed mid-stream failure: finish the item visibly with a clearly
+        // labelled gateway notice instead of response.failed (avoids retry storm).
+        // Only the coarse error kind is exposed — raw_error can carry CLI stderr
+        // or prompt fragments and must never reach the client.
+        const kind = classifyErrorKind(result.raw_error, result.signal);
+        finalText =
+          `${result.accumulated || ""}\n\n[model_gateway notice] ${model} stream ended early (${kind}). ` +
+          "Check the gateway /healthz route state and logs for details.";
+      }
+      if (!started) emitDelta(finalText); // degraded CLI without partial events
+      else if (finalText.startsWith(result.accumulated || "") && finalText !== (result.accumulated || "")) {
+        emitDelta(finalText.slice((result.accumulated || "").length)); // emit missing tail so deltas == done text
+      }
+      const { response } = responseObjects(finalText, model, { ...(streamMeta || {}), item_id: itemId, usage: result.usage });
+      sse(res, { type: "response.output_text.done", item_id: itemId, output_index: 0, content_index: 0, text: finalText });
+      sse(res, {
+        type: "response.content_part.done",
+        item_id: itemId,
+        output_index: 0,
+        content_index: 0,
+        part: { type: "output_text", text: finalText, annotations: [] },
+      });
+      sse(res, { type: "response.output_item.done", item: response.output[0] });
+      sse(res, { type: "response.completed", response });
+      res.end();
+      return;
+    }
     const result =
       routeKind === "claude"
         ? await runClaude(routeModel, prompt)
@@ -1579,7 +1873,7 @@ async function handleResponses(req, res) {
         throw hallucinatedComputerActionError(model, unsupportedClaims);
       }
     }
-    const { response, output } = responseObjects(result.text || "", model, streamMeta || {});
+    const { response, output } = responseObjects(result.text || "", model, { ...(streamMeta || {}), usage: result.usage });
     if (!stream) return json(res, 200, response);
     sse(res, { type: "response.output_item.done", item: output[0] });
     sse(res, { type: "response.completed", response });
