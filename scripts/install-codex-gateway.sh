@@ -26,7 +26,9 @@ HOST="${MODEL_GATEWAY_HOST:-127.0.0.1}"
 # Codex App does not trip its stream-idle timeout. Overridable per machine.
 CLAUDE_TIMEOUT_MS="${CLAUDE_TIMEOUT_MS:-600000}"
 GROK_TIMEOUT_MS="${GROK_TIMEOUT_MS:-300000}"
-MINIMAX_TIMEOUT_MS="${MINIMAX_TIMEOUT_MS:-120000}"
+# M3 long-context first-byte can exceed 120s; 480s avoids misclassifying slow
+# (but healthy) bulk fan-out responses as network errors.
+MINIMAX_TIMEOUT_MS="${MINIMAX_TIMEOUT_MS:-480000}"
 GATEWAY_HEARTBEAT_MS="${GATEWAY_HEARTBEAT_MS:-15000}"
 URL="http://$HOST:$PORT"
 USER_NAME="$(id -un)"

@@ -161,7 +161,12 @@ function json(res, status, payload) {
 // socket mid-send, which Codex surfaced as "error sending request" + a retry storm.
 // Default to 64 MB, overridable via env, and respond with a clean 413 instead of
 // destroying the connection before the handler can reply.
-const MAX_BODY_BYTES = Number(process.env.GATEWAY_MAX_BODY_BYTES) || 64 * 1024 * 1024;
+const MAX_BODY_BYTES = (() => {
+  const parsed = Number(process.env.GATEWAY_MAX_BODY_BYTES);
+  // Guard: NaN, zero, or negative values would either fall through (ok) or make
+  // `bytes > MAX_BODY_BYTES` always true, rejecting every request with 413.
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 64 * 1024 * 1024;
+})();
 
 function readBody(req) {
   return new Promise((resolve, reject) => {

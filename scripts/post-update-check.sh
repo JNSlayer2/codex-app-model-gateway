@@ -82,6 +82,32 @@ if printf '%s' "$b" | rg -q 'requires Codex ChatGPT Authorization'; then pass "G
 elif printf '%s' "$b" | rg -q 'response.completed'; then pass "GPT route 回了完整回應"
 else warn "GPT route 回應異常"; note "'not implemented'→gateway 退版；404→config provider 沒接上"; fi
 
+echo "[5b] auth/session 健康度（refresh-token 輪換競爭預警）"
+main_auth="$SAFE_CODEX_HOME/auth.json"
+if [ -f "$main_auth" ]; then
+  # 多份 auth.json 不同步 = 輪換競爭溫床：一個 consumer 刷新就作廢其餘,
+  # 後端對壞 session 退化成 free 限額（症狀: 401 invalidated / 假撞限額）。
+  main_id="$(stat -f '%d:%i' "$main_auth" 2>/dev/null || stat -c '%d:%i' "$main_auth" 2>/dev/null)"
+  divergent=""
+  for sib in "$HOME/.codex/auth.json" "$HOME/.codex-sub/auth.json" "${CODEX_HOME:-}/auth.json"; do
+    [ -f "$sib" ] || continue
+    [ "$sib" = "$main_auth" ] && continue
+    sib_real="$(readlink -f "$sib" 2>/dev/null || echo "$sib")"
+    main_real="$(readlink -f "$main_auth" 2>/dev/null || echo "$main_auth")"
+    [ "$sib_real" = "$main_real" ] && continue
+    sib_id="$(stat -f '%d:%i' "$sib" 2>/dev/null || stat -c '%d:%i' "$sib" 2>/dev/null)"
+    if [ -n "$sib_id" ] && [ "$sib_id" != "$main_id" ]; then divergent="$divergent $sib"; fi
+  done
+  if [ -z "$divergent" ]; then
+    pass "auth.json 單一真相源（無分歧副本）"
+  else
+    warn "發現分歧的 auth.json 副本:$divergent"
+    note "修復：備份後把副本改成 symlink 指向 $main_auth；若已出現 401 invalidated → 靜默全部消費者後 codex logout && codex login 再逐一開回"
+  fi
+else
+  note "找不到 $main_auth，略過 auth 健康度"
+fi
+
 echo "[6] sidebar thread provider coherence（避免專案列表顯示沒有聊天）"
 state_db="$SAFE_CODEX_HOME/state_5.sqlite"
 if [ -f "$state_db" ] && command -v sqlite3 >/dev/null 2>&1; then

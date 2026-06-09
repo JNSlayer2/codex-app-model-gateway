@@ -69,6 +69,21 @@ If you want Claude, Grok, or MiniMax routes, install Claude Code CLI or Grok CLI
 
 If model switching breaks after a Codex App update, run step 3 first to diagnose, then rerun step 1 if needed. The gateway runs as its own launchd process, so normal app updates do not kill it.
 
+## 快速更新 / Quick update
+
+已 clone 的 checkout（AI agent 友善,exit 0 = 成功）:
+
+```bash
+# 安全模式:pull + 離線自檢(不碰 auth / config / launchd / 運行中 gateway)
+bash scripts/update-skill.sh
+
+# 套用模式:再跑 idempotent 安裝器(備份後重寫 plist/config)+ 驗收
+bash scripts/update-skill.sh --apply
+```
+
+For AI install agents: run the safe mode first; only pass `--apply` when the
+human wants the running gateway/config refreshed. Judge success by exit code.
+
 ## API spend policy
 
 多模型協作預設不得使用按量 API fan-out。內建 GPT 路由是 ChatGPT subscription passthrough，Claude/Grok 走 CLI/OAuth；未來新增 Minimax、本地 OpenAI-compatible 或其他 API adapter 時，必須先進白名單並取得人類確認。
