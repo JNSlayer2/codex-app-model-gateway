@@ -1,15 +1,15 @@
 ---
 name: codex-app-model-gateway
-description: Use when implementing, diagnosing, or handing off Codex App external model gateway v3. Enforces one provider, GPT subscription passthrough, Claude request-scoped tool bridge, sanitized handoff, and rollback-safe verification.
+description: Use when implementing, diagnosing, or handing off Codex App external model gateway v4. Enforces one provider, GPT subscription passthrough, Claude request-scoped tool bridge, sanitized handoff, and rollback-safe verification.
 metadata:
-  short-description: Codex App model gateway v3 workflow
+  short-description: Codex App model gateway v4 workflow
 ---
 
-# Codex App Model Gateway v3
+# Codex App Model Gateway v4
 
 > **免責聲明 / Disclaimer**：本工具讓你在自己付費的 Codex App 內把模型切到 Claude / Grok，並讓 GPT 透過你**自己的** ChatGPT 訂閱 session 繼續運作。它只代理「你自己已登入」的 session，不分發、不竊取任何憑證。但「以本機 proxy 轉發 ChatGPT 訂閱 session」可能牴觸 OpenAI ChatGPT 訂閱條款（訂閱條款對自動化／代理／非官方介面通常比 API 條款更嚴）；Claude CLI / Grok CLI 的包裝亦各受其供應商條款約束。**是否使用、是否合規由你自負**，請先自行確認 OpenAI / Anthropic / xAI 當前條款。本 repo private-first，公開散布前自行評估帳號風險。工具按「現狀（as-is）」提供，無任何擔保。
 
-目標是讓 Codex App 只使用一個穩定 provider：`model_gateway`。同一條 thread 內只切換 `model`，不切換 provider。GPT 走 Codex ChatGPT subscription passthrough；Claude `opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6` 走 Claude CLI adapter，display name 用 `opus4.7`、`opus4.8`、`sonnet4.6`、`haiku4.6`；所有工具能力都由 Codex App request-scoped tool bridge 掌握。
+目標是讓 Codex App 只使用一個穩定 provider：`model_gateway`。同一條 thread 內只切換 `model`，不切換 provider。GPT 走 Codex ChatGPT subscription passthrough；Claude `opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6`、`fable-5` 走 Claude CLI adapter，display name 用 `opus4.7`、`opus4.8`、`sonnet4.6`、`haiku4.6`、`fable5`；所有工具能力都由 Codex App request-scoped tool bridge 掌握。
 
 **穩定交付的 UI 定義**：不只 gateway health、catalog 與 live smoke 要綠，Codex App 左側專案列表也不能因 provider split 顯示「沒有聊天」。若全域 `model_provider` 已切到 `model_gateway`，未封存 `openai` threads 必須經一次性備份後合併到 `model_gateway`，否則 App 可能只顯示 gateway threads，讓舊專案看似消失。
 
@@ -44,13 +44,20 @@ bash scripts/post-update-check.sh --full
 
 > **Codex App 更新後切換失效就用這個修**：先跑步驟 3 定位，再視需要重跑步驟 1。gateway 是 launchd 獨立進程，**App 更新殺不掉它**；更新最常壞的是 config provider 被重設或 CLI 路徑變動，安裝器都會自動處理。腳本相容 macOS 內建 bash 3.2（不依賴 bash 4 的關聯陣列）。
 
+## v4：Fable5 route
+
+- Public catalog slug: `fable-5`; display name: `fable5`; Claude CLI candidate order: `claude-fable-5`, `fable-5`, `fable`.
+- Treat `fable-5` as a premium Claude-family route, not a new Codex provider. It must use the same request-scoped tool bridge and the same fail-closed backend-notice behavior as Opus/Sonnet/Haiku.
+- Default advertised context is `200000` unless the runtime has verified a larger Fable variant; do not over-advertise context based on branding or hearsay.
+- `fable5` is a compatibility alias only. The catalog slug remains `fable-5` so threads switch model within the single `model_gateway` provider.
+
 ## 完成定義
 
 完成時必須同時滿足：
 
-- `model_gateway` 的 `/v1/models` 與 `codex debug models -c model_provider='"model_gateway"'` 同時列出 `gpt-5.5`、`opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6`、`grok-build`，且 Claude display name 不帶 `claude-` 前綴。
+- `model_gateway` 的 `/v1/models` 與 `codex debug models -c model_provider='"model_gateway"'` 同時列出 `gpt-5.5`、`opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6`、`fable-5`、`grok-build`，且 Claude display name 不帶 `claude-` 前綴。
 - `/healthz` 標明 OpenAI/GPT 是 `passthrough`，Claude 是 `prompt_bridge_experimental`，不能把 Claude 說成官方等級 passthrough。
-- 四個 Claude slug 都至少跑一次 `/v1/responses` 極短 smoke test，看到 `response.completed`。Grok CLI 可用時，`grok-build` 也要跑一次同等 smoke。
+- 五個 Claude slug 都至少跑一次 `/v1/responses` 極短 smoke test，看到 `response.completed`。Grok CLI 可用時，`grok-build` 也要跑一次同等 smoke。
 - Claude 文字回覆必須送出 assistant message 的 `response.output_item.done`，不能只有 `response.output_item.added` 或 `response.output_text.done`；否則 Codex App 可能完成 turn 但不落盤可見回覆。
 - app-server 層建立 thread 時 `modelProvider` 是 `model_gateway`；後續 `turn/start` 只改 `model`，能在同一 thread 內先跑 GPT 再跑 Claude。
 - Codex App 左側專案列表不因 provider split 遺失既有未封存 threads；`post-update-check.sh` 的 sidebar provider coherence 必須通過。
@@ -123,7 +130,7 @@ requires_openai_auth = true
 Gateway 依 `request.model` 分流：
 
 - `gpt-*` 與 `codex-auto-review`：原封不動 proxy 到 Codex ChatGPT subscription Responses endpoint，保留官方 Codex tools、MCP、computer use、plan/goal mode 與未來 Codex App 功能。
-- `opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6`：呼叫 Claude CLI，使用 `--no-session-persistence`、空 MCP config、停用 slash commands、禁止 Claude 原生工具執行。`opus4.7`、`opus4.8`、`sonnet4.6`、`haiku4.6` 可作為相容 alias，但 catalog slug 保留 Codex 已驗證可解析的 hyphen form。
+- `opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6`、`fable-5`：呼叫 Claude CLI，使用 `--no-session-persistence`、空 MCP config、停用 slash commands、禁止 Claude 原生工具執行。`opus4.7`、`opus4.8`、`sonnet4.6`、`haiku4.6`、`fable5` 可作為相容 alias，但 catalog slug 保留 Codex 已驗證可解析的 hyphen form。
 - Grok `grok-build`：呼叫 Grok CLI，保留 Grok CLI 自己的模型命名，gateway request 內停用 plan/memory/web search/native tools；Codex tools 仍只走 request-scoped prompt bridge。
 - 未來模型：只新增 catalog entry 與 backend adapter，不新增 Codex provider；先補 capability matrix，再補 tests。
 
@@ -190,10 +197,10 @@ bash scripts/readonly-diagnose-codex-gateway.sh
 
 ```bash
 TS="$(date +%Y%m%d-%H%M%S)"
-mkdir -p "$HOME/.codex/backups/model-gateway-v3-$TS"
-cp "$HOME/.codex/config.toml" "$HOME/.codex/backups/model-gateway-v3-$TS/config.toml"
-cp "$HOME/.codex/state_5.sqlite" "$HOME/.codex/backups/model-gateway-v3-$TS/state_5.sqlite"
-cp "$HOME/.codex/models_cache.json" "$HOME/.codex/backups/model-gateway-v3-$TS/models_cache.json" 2>/dev/null || true
+mkdir -p "$HOME/.codex/backups/model-gateway-v4-$TS"
+cp "$HOME/.codex/config.toml" "$HOME/.codex/backups/model-gateway-v4-$TS/config.toml"
+cp "$HOME/.codex/state_5.sqlite" "$HOME/.codex/backups/model-gateway-v4-$TS/state_5.sqlite"
+cp "$HOME/.codex/models_cache.json" "$HOME/.codex/backups/model-gateway-v4-$TS/models_cache.json" 2>/dev/null || true
 ```
 
 3. 部署 gateway runtime，確認 `package.json` 有 `npm test`，server 有 `/healthz`、`/v1/models`、`/v1/responses`。
@@ -238,24 +245,24 @@ Claude quota 尚未 reset 時，只驗證非 Claude live 項目：
 MODEL_GATEWAY_DIR=<gateway-dir> RUN_CLAUDE_SMOKE=0 bash scripts/live-verify-codex-gateway.sh
 ```
 
-`scripts/live-verify-codex-gateway.sh` 會呼叫 `scripts/app-server-same-thread-smoke.js` 驗證同一條 app-server thread 可依序跑 `gpt-5.5 -> opus-4-7 -> opus-4-8 -> sonnet-4-6 -> haiku-4-6 -> gpt-5.5`，且四個 Claude slug 都能讀到 GPT 前一輪放入的驗收碼。
+`scripts/live-verify-codex-gateway.sh` 會呼叫 `scripts/app-server-same-thread-smoke.js` 驗證同一條 app-server thread 可依序跑 `gpt-5.5 -> opus-4-7 -> opus-4-8 -> sonnet-4-6 -> haiku-4-6 -> fable-5 -> gpt-5.5`，且五個 Claude slug 都能讀到 GPT 前一輪放入的驗收碼。
 完整驗收不得設定 `RUN_CLAUDE_SMOKE=0` 或 `RUN_SAME_THREAD_SMOKE=0`；跳過模式只用於 quota reset 前確認非 Claude 路徑沒有退化。
 
 Catalog：
 
 ```bash
 curl -fsS http://127.0.0.1:4177/v1/models \
-  | jq -r '.models[]? | select(.slug|test("^(gpt-5.5|opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6|grok-build)$")) | [.slug,.display_name,.capabilities.backend,.capabilities.codex_tools] | @tsv'
+  | jq -r '.models[]? | select(.slug|test("^(gpt-5.5|opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6|fable-5|grok-build)$")) | [.slug,.display_name,.capabilities.backend,.capabilities.codex_tools] | @tsv'
 
 codex debug models -c model_provider='"model_gateway"' \
   | jq -r '.models[]?.slug' \
-  | rg '^(gpt-5\.5|opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6)$'
+  | rg '^(gpt-5\.5|opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6|fable-5)$'
 ```
 
 Claude slug smoke：
 
 ```bash
-for model in opus-4-7 opus-4-8 sonnet-4-6 haiku-4-6; do
+for model in opus-4-7 opus-4-8 sonnet-4-6 haiku-4-6 fable-5; do
   curl --max-time 90 -sS -N http://127.0.0.1:4177/v1/responses \
     -H 'content-type: application/json' \
     -d "{\"model\":\"$model\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"只回 OK_$model。\"}]}],\"stream\":true}" \
@@ -276,7 +283,7 @@ app-server same-thread 驗收要檢查這三件事：
 
 - `thread/start` response 的 `modelProvider` 是 `model_gateway`。
 - 第一個 `turn/start` 用 `model: "gpt-5.5"` 成功。
-- 同一個 `threadId` 後續 `turn/start` 分別用 `opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6` 成功讀到前文，最後再切回 `gpt-5.5` 成功。
+- 同一個 `threadId` 後續 `turn/start` 分別用 `opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6`、`fable-5` 成功讀到前文，最後再切回 `gpt-5.5` 成功。
 
 ## 失敗處理
 
@@ -306,7 +313,7 @@ app-server same-thread 驗收要檢查這三件事：
 
 ## GitHub / Handoff Hygiene
 
-提交 v3 到 GitHub 前必須檢查：
+提交 v4 到 GitHub 前必須檢查：
 
 - 不提交 `auth.json`、token、SQLite、models cache、logs、rollout、screenshots、private thread ids。
 - 不提交本機絕對路徑；文件只使用 `$HOME`、`$CODEX_HOME`、`127.0.0.1`、`<repo>`、`<gateway-dir>`。

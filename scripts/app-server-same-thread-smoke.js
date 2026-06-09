@@ -5,7 +5,7 @@ const { spawn } = require("node:child_process");
 
 const timeoutMs = Number(process.env.APP_SERVER_SAME_THREAD_TIMEOUT_MS || 600000);
 const code = `CODEX_GATEWAY_CONTEXT_${Date.now()}`;
-const claudeThreadModels = (process.env.SAME_THREAD_CLAUDE_MODELS || "opus-4-7,opus-4-8,sonnet-4-6,haiku-4-6")
+const claudeThreadModels = (process.env.SAME_THREAD_CLAUDE_MODELS || "opus-4-7,opus-4-8,sonnet-4-6,haiku-4-6,fable-5")
   .split(",")
   .map((model) => model.trim())
   .filter(Boolean);

@@ -21,7 +21,7 @@ if [ -z "$GW_DIR" ]; then
     [ -f "$c/server.js" ] && { GW_DIR="$(cd "$c" && pwd)"; break; }
   done
 fi
-EXPECT_SLUGS=(gpt-5.5 opus-4-7 opus-4-8 sonnet-4-6 haiku-4-6 grok-build minimax-m3)
+EXPECT_SLUGS=(gpt-5.5 opus-4-7 opus-4-8 sonnet-4-6 haiku-4-6 fable-5 grok-build minimax-m3)
 
 full=0; [ "${1:-}" = "--full" ] && full=1
 fails=0

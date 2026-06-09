@@ -60,6 +60,25 @@ async function startMockChatgpt() {
   return { server, seen, baseUrl: `http://127.0.0.1:${server.address().port}/api/codex` };
 }
 
+async function startSlowMockChatgpt() {
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, {
+        "content-type": "text/event-stream; charset=utf-8",
+      });
+      res.write('data: {"type":"response.created"}\n\n');
+      const interval = setInterval(() => {
+        res.write(': upstream keepalive\n\n');
+      }, 25);
+      res.on("close", () => clearInterval(interval));
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  return { server, baseUrl: `http://127.0.0.1:${server.address().port}/api/codex` };
+}
+
 async function startGateway(env = {}) {
   const port = await freePort();
   const child = spawn(process.execPath, ["server.js"], {
@@ -117,11 +136,15 @@ test("model catalog exposes GPT, Claude, Grok, and MiniMax slugs from the single
   const slugs = catalog.models.map((model) => model.slug);
 
   assert.deepEqual(
-    ["gpt-5.5", "opus-4-7", "opus-4-8", "sonnet-4-6", "haiku-4-6", "grok-build", "minimax-m3"].every((slug) =>
+    ["gpt-5.5", "opus-4-7", "opus-4-8", "sonnet-4-6", "haiku-4-6", "fable-5", "grok-build", "minimax-m3"].every((slug) =>
       slugs.includes(slug),
     ),
     true,
   );
+  const fable = catalog.models.find((model) => model.slug === "fable-5");
+  assert.equal(fable.display_name, "fable5");
+  assert.equal(fable.context_window, 200000);
+  assert.equal(fable.capabilities.backend, "claude_cli");
   const minimax = catalog.models.find((model) => model.slug === "minimax-m3");
   assert.equal(minimax.capabilities.backend, "minimax_api");
   assert.equal(minimax.capabilities.api_spend, "minimax-near-unlimited-api");
@@ -180,6 +203,38 @@ test("GPT models are proxied to the ChatGPT Codex subscription endpoint", async 
   assert.equal(upstream.seen[0].headers["session-id"], "session-123");
   assert.equal(upstream.seen[0].headers["thread-id"], "thread-123");
   assert.equal(upstream.seen[0].body.model, "gpt-5.5");
+});
+
+test("GPT passthrough client disconnect aborts upstream without crashing gateway", async (t) => {
+  const upstream = await startSlowMockChatgpt();
+  t.after(() => upstream.server.close());
+  const gateway = await startGateway({ CHATGPT_CODEX_BASE_URL: upstream.baseUrl });
+  t.after(async () => gateway.close());
+
+  const controller = new AbortController();
+  const request = fetch(`http://127.0.0.1:${gateway.port}/v1/responses`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: "Bearer test-token",
+    },
+    body: JSON.stringify({
+      model: "gpt-5.5",
+      input: "stream slowly",
+      stream: true,
+    }),
+    signal: controller.signal,
+  });
+
+  const res = await request;
+  assert.equal(res.status, 200);
+  controller.abort();
+  await res.text().catch(() => {});
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  assert.equal(gateway.child.exitCode, null);
+  const health = await requestJson(`http://127.0.0.1:${gateway.port}/healthz`);
+  assert.equal(health.ok, true);
 });
 
 test("oversized requests return a clean 413 instead of resetting the socket", async (t) => {
@@ -285,6 +340,36 @@ test("Claude text responses emit completed assistant message items for Codex App
   assert.ok(events.some((event) => event.type === "response.completed"));
 });
 
+test("Claude long buffered streams emit semantic in-progress heartbeats before completion", async (t) => {
+  const gateway = await startGateway({
+    CLAUDE_MOCK_RESPONSE_JSON: "OK_AFTER_HEARTBEAT",
+    CLAUDE_MOCK_DELAY_MS: "90",
+    GATEWAY_HEARTBEAT_MS: "20",
+  });
+  t.after(async () => gateway.close());
+
+  const res = await fetch(`http://127.0.0.1:${gateway.port}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "opus-4-8",
+      input: "reply after heartbeat",
+      stream: true,
+    }),
+  });
+
+  const events = parseSseEvents(await res.text());
+  const createdIndex = events.findIndex((event) => event.type === "response.created");
+  const heartbeatIndex = events.findIndex((event) => event.type === "response.in_progress");
+  const completedIndex = events.findIndex((event) => event.type === "response.completed");
+
+  assert.equal(res.status, 200);
+  assert.equal(createdIndex, 0);
+  assert.ok(heartbeatIndex > createdIndex);
+  assert.ok(completedIndex > heartbeatIndex);
+  assert.ok(events.some((event) => event.item?.type === "message" && event.item.content?.[0]?.text === "OK_AFTER_HEARTBEAT"));
+});
+
 test("Claude subscription limits complete visibly instead of triggering Codex retry loops", async (t) => {
   const gateway = await startGateway({
     CLAUDE_MOCK_ERROR_TEXT: "You've hit your session limit · resets 4:30am",
@@ -373,7 +458,7 @@ test("compact Claude slugs remain accepted as aliases", async (t) => {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      model: "haiku4.6",
+      model: "fable5",
       input: "reply through compact alias",
       stream: false,
     }),

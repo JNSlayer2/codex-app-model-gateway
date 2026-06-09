@@ -166,6 +166,20 @@ if grep -q '^model_provider[[:space:]]*=' "$CFG"; then
 else
   printf 'model_provider = "model_gateway"\n' >> "$CFG"
 fi
+
+set_top_key() {
+  key="$1"; value="$2"
+  if grep -q "^[[:space:]]*$key[[:space:]]*=" "$CFG"; then
+    sed -i '' "s|^[[:space:]]*$key[[:space:]]*=.*|$key = $value|" "$CFG"
+  else
+    printf '%s = %s\n' "$key" "$value" >> "$CFG"
+  fi
+}
+set_top_key model_reasoning_effort '"low"'
+set_top_key service_tier '"fast"'
+set_top_key model_auto_compact_token_limit '200000'
+set_top_key model_auto_compact_token_limit_scope '"total"'
+
 if ! grep -q '^\[model_providers.model_gateway\]' "$CFG"; then
   cat >> "$CFG" <<PROV_EOF
 

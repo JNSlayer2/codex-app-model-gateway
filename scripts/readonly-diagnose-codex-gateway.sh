@@ -42,7 +42,7 @@ redact() {
     -e 's#[A-Za-z0-9._%+-]\+@[A-Za-z0-9.-]\+\.[A-Za-z]\{2,\}#[REDACTED_EMAIL]#g'
 }
 
-model_filter='^(gpt-5\.5|opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6)$'
+model_filter='^(gpt-5\.5|opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6|fable-5)$'
 
 section "Host"
 printf 'user: %s\n' "$(id -un 2>/dev/null || true)"

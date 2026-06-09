@@ -1,8 +1,14 @@
-# Codex App Model Gateway (v3)
+# Codex App Model Gateway (v4)
 
-讓 Codex App 只用**單一 provider** `model_gateway`，在**同一條 thread 內自由切換 GPT / Claude / Grok**——只切 `model`，不切 provider。不修改 signed Codex App bundle。
+讓 Codex App 只用**單一 provider** `model_gateway`，在**同一條 thread 內自由切換 GPT / Claude（含 Fable5）/ Grok / MiniMax**——只切 `model`，不切 provider。不修改 signed Codex App bundle。
 
-Use a **single provider** `model_gateway` for Codex App, and switch between **GPT / Claude / Grok inside the same thread** by changing only the `model`, not the provider. No patching of the signed Codex App bundle.
+Use a **single provider** `model_gateway` for Codex App, and switch between **GPT / Claude (including Fable5) / Grok / MiniMax** inside the same thread by changing only the `model`, not the provider. No patching of the signed Codex App bundle.
+
+## v4 highlights
+
+- Adds `fable-5` / `fable5` as a Claude-family premium route backed by the Claude CLI candidate `claude-fable-5`.
+- Keeps the one-provider design: select `model_gateway` once, then switch `model` inside a thread.
+- Carries long-turn hardening for heavy multi-model work: semantic `response.in_progress` heartbeats, clean `413` for oversized bodies, and safe GPT passthrough cancellation.
 
 ## Companion project / 搭配專案
 
@@ -28,7 +34,7 @@ In short:
 
 例如，如果未來某個模型或 adapter 被接進 gateway，像 Minimax 這類外部模型就有機會在 Codex App 這個工作流裡使用到同一套 request-scoped tools、computer use 與多模型分工邏輯，形成真正可落地的跨品牌協作。
 
-> **免責聲明 / Disclaimer**：本工具讓你在自己付費的 Codex App 內把模型切到 Claude / Grok，並讓 GPT 透過你**自己的** ChatGPT 訂閱 session 繼續運作。它只代理「你自己已登入」的 session，不分發、不竊取任何憑證。但「以本機 proxy 轉發 ChatGPT 訂閱 session」可能牴觸 OpenAI ChatGPT 訂閱條款（訂閱條款對自動化／代理／非官方介面通常比 API 條款更嚴）；Claude CLI / Grok CLI 的包裝亦各受其供應商條款約束。**是否使用、是否合規由你自負**，請先自行確認 OpenAI / Anthropic / xAI 當前條款。private-first，公開散布前自評帳號風險。工具按「現狀（as-is）」提供，無任何擔保。
+> **免責聲明 / Disclaimer**：本工具讓你在自己付費的 Codex App 內把模型切到 Claude / Grok / MiniMax，並讓 GPT 透過你**自己的** ChatGPT 訂閱 session 繼續運作。它只代理「你自己已登入」的 session，不分發、不竊取任何憑證。但「以本機 proxy 轉發 ChatGPT 訂閱 session」可能牴觸 OpenAI ChatGPT 訂閱條款（訂閱條款對自動化／代理／非官方介面通常比 API 條款更嚴）；Claude CLI / Grok CLI 的包裝亦各受其供應商條款約束。**是否使用、是否合規由你自負**，請先自行確認 OpenAI / Anthropic / xAI 當前條款。private-first，公開散布前自評帳號風險。工具按「現狀（as-is）」提供，無任何擔保。
 
 ## 一鍵安裝（拿到就能裝）
 
@@ -55,9 +61,9 @@ bash scripts/post-update-check.sh
 bash scripts/post-update-check.sh --full
 ```
 
-需要 `claude` / `grok` 路由就先各自安裝 Claude Code CLI / Grok CLI；沒裝也能只跑 GPT + 已裝的部分。安裝器相容 macOS 內建 bash 3.2、idempotent、會備份、不碰 signed app bundle。安裝器會在切到 `model_gateway` 後，備份並合併未封存 `openai` threads；這是為了避免 Codex App sidebar 只列目前 provider，讓舊專案看似沒有聊天。
+需要 `claude` / `grok` 路由就先各自安裝 Claude Code CLI / Grok CLI or the configured MiniMax endpoint；沒裝也能只跑 GPT + 已裝的部分。安裝器相容 macOS 內建 bash 3.2、idempotent、會備份、不碰 signed app bundle。安裝器會在切到 `model_gateway` 後，備份並合併未封存 `openai` threads；這是為了避免 Codex App sidebar 只列目前 provider，讓舊專案看似沒有聊天。
 
-If you want Claude or Grok routes, install Claude Code CLI or Grok CLI first. If they are not installed, you can still run GPT and whichever routes are available. The installer is idempotent, macOS bash 3.2 compatible, makes backups first, and does not touch the signed app bundle.
+If you want Claude, Grok, or MiniMax routes, install Claude Code CLI or Grok CLI first. If they are not installed, you can still run GPT and whichever routes are available. The installer is idempotent, macOS bash 3.2 compatible, makes backups first, and does not touch the signed app bundle.
 
 **Codex App 更新後切換失效**：先跑步驟 3 定位，再視需要重跑步驟 1。gateway 是 launchd 獨立進程，App 更新殺不掉它。
 
@@ -85,7 +91,7 @@ The gateway exposes this via `/healthz.api_spend_policy`. `GATEWAY_API_MODEL_ALL
 - `scripts/post-update-check.sh`：更新後/維修驗收（read-only；`--full` 跑同 thread；含 sidebar provider coherence）。
 - `scripts/readonly-diagnose-codex-gateway.sh`：只讀診斷摘要。
 - `scripts/migrate-sidebar-threads-to-gateway.sh`：一次性備份並合併未封存 `openai` threads 到 `model_gateway`，修復專案列表「沒有聊天」。
-- `scripts/live-verify-codex-gateway.sh` + `scripts/app-server-same-thread-smoke.js`：完整 live 驗收（同 thread `gpt → 4×Claude → gpt` 上下文接續）。
+- `scripts/live-verify-codex-gateway.sh` + `scripts/app-server-same-thread-smoke.js`：完整 live 驗收（同 thread `gpt → 5×Claude → gpt` 上下文接續）。
 - `reports/`、`references/`：回報模板與**抽象化**事故教訓（不含本機 state / logs / 逆向細節）。
 
 - `SKILL.md`: full architecture, deployment/repair flow, definition of done, non-destructive boundaries, failure handling, rollback, and iteration notes.
@@ -94,7 +100,7 @@ The gateway exposes this via `/healthz.api_spend_policy`. `GATEWAY_API_MODEL_ALL
 - `scripts/post-update-check.sh`: post-update or post-repair verification (`--full` runs same-thread live switching; includes sidebar provider coherence).
 - `scripts/readonly-diagnose-codex-gateway.sh`: read-only diagnostic summary.
 - `scripts/migrate-sidebar-threads-to-gateway.sh`: one-time backed-up merge of unarchived `openai` threads into `model_gateway`, fixing sidebar "no chats" after provider switch.
-- `scripts/live-verify-codex-gateway.sh` + `scripts/app-server-same-thread-smoke.js`: full live verification for same-thread `gpt → 4×Claude → gpt` continuity.
+- `scripts/live-verify-codex-gateway.sh` + `scripts/app-server-same-thread-smoke.js`: full live verification for same-thread `gpt → 5×Claude → gpt` continuity.
 - `reports/`, `references/`: report templates and **abstracted** incident lessons only, without local state, logs, or reverse-engineering details.
 
 ## 資訊安全規則

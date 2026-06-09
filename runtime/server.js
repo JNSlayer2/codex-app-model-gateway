@@ -54,6 +54,11 @@ const claudeRoutes = {
     display_name: "haiku4.6",
     candidates: ["claude-haiku-4-6", "haiku-4-6", "haiku"],
   },
+  "fable-5": {
+    display_name: "fable5",
+    candidates: ["claude-fable-5", "fable-5", "fable"],
+    context_window: 200000,
+  },
 };
 
 const claudeAliases = {
@@ -61,6 +66,7 @@ const claudeAliases = {
   "opus4.8": "opus-4-8",
   "sonnet4.6": "sonnet-4-6",
   "haiku4.6": "haiku-4-6",
+  "fable5": "fable-5",
 };
 
 const grokRoutes = {
@@ -790,11 +796,19 @@ async function runMiniMax(slug, prompt) {
 
 function runClaudeOnce(model, prompt) {
   return new Promise((resolve) => {
+    const resolveMock = (payload) => {
+      const delayMs = Number(process.env.CLAUDE_MOCK_DELAY_MS || 0);
+      if (delayMs > 0) {
+        setTimeout(() => resolve(payload), delayMs).unref?.();
+        return;
+      }
+      resolve(payload);
+    };
     if (process.env.CLAUDE_MOCK_PROMPT_FILE) {
       fs.writeFileSync(process.env.CLAUDE_MOCK_PROMPT_FILE, prompt);
     }
     if (process.env.CLAUDE_MOCK_ERROR_TEXT !== undefined) {
-      resolve({
+      resolveMock({
         ok: false,
         model,
         code: 1,
@@ -806,7 +820,7 @@ function runClaudeOnce(model, prompt) {
       return;
     }
     if (process.env.CLAUDE_MOCK_RESPONSE_JSON !== undefined) {
-      resolve({
+      resolveMock({
         ok: true,
         model,
         code: 0,
@@ -1156,10 +1170,10 @@ function sse(res, event) {
   res.write(`data: ${JSON.stringify(event)}\n\n`);
 }
 
-function responseObjects(text, model) {
-  const id = `resp_${crypto.randomBytes(12).toString("hex")}`;
+function responseObjects(text, model, options = {}) {
+  const id = options.id || `resp_${crypto.randomBytes(12).toString("hex")}`;
   const itemId = `msg_${crypto.randomBytes(12).toString("hex")}`;
-  const created = Math.floor(Date.now() / 1000);
+  const created = options.created_at || Math.floor(Date.now() / 1000);
   const output = [
     {
       id: itemId,
@@ -1179,6 +1193,17 @@ function responseObjects(text, model) {
     output_text: text,
   };
   return { id, itemId, response, output };
+}
+
+function inProgressResponseObject(model, options = {}) {
+  return {
+    id: options.id || `resp_${crypto.randomBytes(12).toString("hex")}`,
+    object: "response",
+    created_at: options.created_at || Math.floor(Date.now() / 1000),
+    status: "in_progress",
+    model,
+    output: [],
+  };
 }
 
 function stripJsonFence(text) {
@@ -1317,9 +1342,9 @@ function extractRequestedToolCalls(text, toolSpecs) {
   });
 }
 
-function toolCallResponseObjects(toolCalls, model) {
-  const id = `resp_${crypto.randomBytes(12).toString("hex")}`;
-  const created = Math.floor(Date.now() / 1000);
+function toolCallResponseObjects(toolCalls, model, options = {}) {
+  const id = options.id || `resp_${crypto.randomBytes(12).toString("hex")}`;
+  const created = options.created_at || Math.floor(Date.now() / 1000);
   const output = toolCalls.map((call) => {
     const item = {
       type: "function_call",
@@ -1391,8 +1416,16 @@ async function proxyChatgpt(req, res, bodyText, stream) {
   // Abort the upstream ChatGPT request on timeout or if the client disconnects, so a
   // stuck/abandoned passthrough never holds a connection or keeps reading the stream.
   const controller = new AbortController();
-  const upstreamTimer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
-  const onClientGone = () => controller.abort();
+  let timedOut = false;
+  let clientGone = false;
+  const upstreamTimer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, UPSTREAM_TIMEOUT_MS);
+  const onClientGone = () => {
+    clientGone = true;
+    controller.abort();
+  };
   res.on("close", onClientGone);
   const cleanup = () => {
     clearTimeout(upstreamTimer);
@@ -1408,6 +1441,20 @@ async function proxyChatgpt(req, res, bodyText, stream) {
     });
   } catch (error) {
     cleanup();
+    if (clientGone || res.writableEnded || error.name === "AbortError") {
+      if (timedOut && !clientGone && !res.writableEnded) {
+        const message = `GPT subscription passthrough timed out after ${UPSTREAM_TIMEOUT_MS}ms`;
+        if (!stream) return json(res, 504, { error: { message } });
+        res.writeHead(200, {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+          connection: "keep-alive",
+        });
+        sse(res, { type: "response.failed", error: { message, status: 504 } });
+        return res.end();
+      }
+      return;
+    }
     const message = `GPT subscription passthrough failed before upstream response: ${error.message}`;
     if (!stream) return json(res, 502, { error: { message } });
     res.writeHead(200, {
@@ -1434,10 +1481,14 @@ async function proxyChatgpt(req, res, bodyText, stream) {
       if (res.writableEnded) break; // client disconnected — stop draining upstream
       res.write(Buffer.from(value));
     }
+  } catch (error) {
+    if (!(clientGone || res.writableEnded || error.name === "AbortError")) {
+      throw error;
+    }
   } finally {
     cleanup();
     try { await reader.cancel(); } catch {}
-    res.end();
+    if (!res.writableEnded) res.end();
   }
 }
 
@@ -1481,14 +1532,20 @@ async function handleResponses(req, res) {
       connection: "keep-alive",
     });
   }
-  // Buffered backends (claude/grok CLI) send nothing until the turn completes; a long
-  // 1M-context turn would otherwise look idle and trip Codex App's stream timeout. Emit
-  // SSE comment keepalives during the await so the connection stays visibly alive.
+  // Buffered backends (Claude/Grok CLI and MiniMax API) send nothing until the turn
+  // completes; a long 1M-context turn would otherwise look idle and trip Codex App's
+  // stream timeout. Emit a real Responses event immediately, then periodic semantic
+  // in-progress events. Plain SSE comments were not enough for every Codex App path:
+  // some reconnect layers count only data-bearing SSE events as activity.
   let heartbeat = null;
+  const streamMeta = stream ? { id: `resp_${crypto.randomBytes(12).toString("hex")}`, created_at: Math.floor(Date.now() / 1000) } : null;
   if (stream) {
+    sse(res, { type: "response.created", response: inProgressResponseObject(model, streamMeta) });
     heartbeat = setInterval(() => {
       try {
-        if (!res.writableEnded) res.write(`: keepalive ${routeKind || "backend"}\n\n`);
+        if (!res.writableEnded) {
+          sse(res, { type: "response.in_progress", response: inProgressResponseObject(model, streamMeta) });
+        }
       } catch {}
     }, HEARTBEAT_MS);
     if (typeof heartbeat.unref === "function") heartbeat.unref();
@@ -1502,9 +1559,8 @@ async function handleResponses(req, res) {
           : await runMiniMax(model, prompt);
     const toolCalls = toolSpecs.length > 0 ? extractRequestedToolCalls(result.text || "", toolSpecs) : null;
     if (toolCalls) {
-      const { response, output } = toolCallResponseObjects(toolCalls, model);
+      const { response, output } = toolCallResponseObjects(toolCalls, model, streamMeta || {});
       if (!stream) return json(res, 200, response);
-      sse(res, { type: "response.created", response: { ...response, status: "in_progress", output: [] } });
       output.forEach((item) => sse(res, { type: "response.output_item.done", item }));
       sse(res, { type: "response.completed", response });
       res.end();
@@ -1518,17 +1574,15 @@ async function handleResponses(req, res) {
         throw hallucinatedComputerActionError(model, unsupportedClaims);
       }
     }
-    const { response, output } = responseObjects(result.text || "", model);
+    const { response, output } = responseObjects(result.text || "", model, streamMeta || {});
     if (!stream) return json(res, 200, response);
-    sse(res, { type: "response.created", response: { ...response, status: "in_progress", output: [] } });
     sse(res, { type: "response.output_item.done", item: output[0] });
     sse(res, { type: "response.completed", response });
     res.end();
   } catch (error) {
     if (routeKind && isBackendNoticeError(error)) {
-      const { response, output } = responseObjects(backendNoticeText(model, error), model);
+      const { response, output } = responseObjects(backendNoticeText(model, error), model, streamMeta || {});
       if (!stream) return json(res, 200, response);
-      sse(res, { type: "response.created", response: { ...response, status: "in_progress", output: [] } });
       sse(res, { type: "response.output_item.done", item: output[0] });
       sse(res, { type: "response.completed", response });
       res.end();
@@ -1550,18 +1604,25 @@ async function handleResponses(req, res) {
 }
 
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host || `${HOST}:${PORT}`}`);
-  console.log(`${new Date().toISOString()} ${req.method} ${url.pathname}`);
-  if (req.method === "GET" && (url.pathname === "/healthz" || url.pathname === "/health")) {
-    return json(res, 200, healthPayload());
+  try {
+    const url = new URL(req.url, `http://${req.headers.host || `${HOST}:${PORT}`}`);
+    console.log(`${new Date().toISOString()} ${req.method} ${url.pathname}`);
+    if (req.method === "GET" && (url.pathname === "/healthz" || url.pathname === "/health")) {
+      return json(res, 200, healthPayload());
+    }
+    if (req.method === "GET" && url.pathname === "/v1/models") {
+      return json(res, 200, modelsPayload());
+    }
+    if (req.method === "POST" && url.pathname === "/v1/responses") {
+      await handleResponses(req, res);
+      return;
+    }
+    return json(res, 404, { error: { message: "not found" } });
+  } catch (error) {
+    if (res.writableEnded) return;
+    console.error("request handler failed:", error);
+    return json(res, error.status || 500, { error: { message: error.message || "internal server error" } });
   }
-  if (req.method === "GET" && url.pathname === "/v1/models") {
-    return json(res, 200, modelsPayload());
-  }
-  if (req.method === "POST" && url.pathname === "/v1/responses") {
-    return handleResponses(req, res);
-  }
-  return json(res, 404, { error: { message: "not found" } });
 });
 
 server.listen(PORT, HOST, () => {

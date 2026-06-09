@@ -8,8 +8,8 @@ run_grok="${RUN_GROK_SMOKE:-1}"
 run_minimax="${RUN_MINIMAX_SMOKE:-0}"
 run_app_server="${RUN_APP_SERVER_SMOKE:-1}"
 run_same_thread="${RUN_SAME_THREAD_SMOKE:-1}"
-models_re='^(gpt-5\.5|opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6|grok-build|minimax-m3)$'
-claude_models=(opus-4-7 opus-4-8 sonnet-4-6 haiku-4-6)
+models_re='^(gpt-5\.5|opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6|fable-5|grok-build|minimax-m3)$'
+claude_models=(opus-4-7 opus-4-8 sonnet-4-6 haiku-4-6 fable-5)
 grok_models=(grok-build)
 minimax_models=(minimax-m3)
 failures=0
@@ -74,7 +74,7 @@ if [[ -n "$catalog" ]]; then
     fi
   done
   if [[ "$missing" -eq 0 ]]; then
-    if jq -r '.models[]? | select(.slug|test("^(opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6)$")) | .display_name' <<<"$catalog" | rg -q '^claude-'; then
+    if jq -r '.models[]? | select(.slug|test("^(opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6|fable-5)$")) | .display_name' <<<"$catalog" | rg -q '^claude-'; then
       fail "gateway catalog has claude-prefixed display name"
     else
       pass "gateway catalog slugs, compact Claude display names, Grok model name, and MiniMax model name"
