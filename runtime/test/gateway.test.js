@@ -128,7 +128,7 @@ function parseSseEvents(text) {
     .map((line) => JSON.parse(line.slice("data: ".length)));
 }
 
-test("model catalog exposes GPT, ChatGPT Pro consultant, Claude, Grok, and MiniMax slugs from the single gateway provider", async (t) => {
+test("model catalog exposes GPT, Claude, Grok, and MiniMax slugs while hiding deprecated ChatGPT Pro alias", async (t) => {
   const gateway = await startGateway();
   t.after(async () => gateway.close());
 
@@ -138,7 +138,6 @@ test("model catalog exposes GPT, ChatGPT Pro consultant, Claude, Grok, and MiniM
   assert.deepEqual(
     [
       "gpt-5.5",
-      "chatgpt-pro-consult",
       "opus-4-7",
       "opus-4-8",
       "sonnet-4-6",
@@ -149,17 +148,17 @@ test("model catalog exposes GPT, ChatGPT Pro consultant, Claude, Grok, and MiniM
     ].every((slug) => slugs.includes(slug)),
     true,
   );
-  const proConsult = catalog.models.find((model) => model.slug === "chatgpt-pro-consult");
-  assert.equal(proConsult.display_name, "ChatGPT Pro Consult");
-  assert.equal(proConsult.capabilities.backend, "chatgpt_subscription");
-  assert.equal(proConsult.capabilities.role, "codex_native_consultant");
-  assert.equal(proConsult.capabilities.upstream_model, "gpt-5.5");
-  assert.equal(proConsult.capabilities.isolation, "codex_first_party_same_thread");
-  assert.equal(proConsult.capabilities.author_model, "gpt-5.5");
-  assert.equal(proConsult.capabilities.decision_model, "gpt-5.5");
-  assert.equal(proConsult.capabilities.executor_host, "codex-app");
-  assert.equal(proConsult.capabilities.authority_mode, "tool_intent_bridge");
-  assert.equal(proConsult.capabilities.pro_research_equivalence, false);
+  assert.equal(catalog.models.some((model) => model.slug === "chatgpt-pro-consult"), false);
+  const gpt55 = catalog.models.find((model) => model.slug === "gpt-5.5");
+  assert.equal(gpt55.display_name, "GPT-5.5");
+  assert.equal(gpt55.capabilities.backend, "chatgpt_subscription");
+  assert.equal(gpt55.capabilities.role, "codex_primary");
+  assert.equal(gpt55.capabilities.upstream_model, "gpt-5.5");
+  assert.equal(gpt55.capabilities.author_model, "gpt-5.5");
+  assert.equal(gpt55.capabilities.decision_model, "gpt-5.5");
+  assert.equal(gpt55.capabilities.executor_host, "codex-app");
+  assert.equal(gpt55.capabilities.authority_mode, "tool_intent_bridge");
+  assert.equal(gpt55.capabilities.pro_research_equivalence, false);
   const fable = catalog.models.find((model) => model.slug === "fable-5");
   assert.equal(fable.display_name, "fable5");
   assert.equal(fable.context_window, 200000);
@@ -195,8 +194,11 @@ test("healthz exposes deny-by-default API spend policy", async (t) => {
   assert.equal(health.capabilities.claude.authority_mode, "tool_intent_bridge");
   assert.equal(health.capabilities.claude.patch_proposal, "supported_by_model_output");
   assert.equal(health.routes["chatgpt-pro-consult"].backend, "chatgpt_subscription");
-  assert.equal(health.routes["chatgpt-pro-consult"].role, "codex_native_consultant");
+  assert.equal(health.routes["chatgpt-pro-consult"].role, "deprecated_gpt55_alias");
   assert.equal(health.routes["chatgpt-pro-consult"].upstream_model, "gpt-5.5");
+  assert.equal(health.routes["chatgpt-pro-consult"].listed_in_catalog, false);
+  assert.equal(health.routes["chatgpt-pro-consult"].deprecated, true);
+  assert.equal(health.routes["chatgpt-pro-consult"].replaced_by, "gpt-5.5");
   assert.equal(health.routes["chatgpt-pro-consult"].pro_research_equivalence, false);
   assert.equal(health.capabilities.minimax.backend, "minimax_api");
   assert.equal(health.capabilities.minimax.spend_allowed, true);
@@ -255,7 +257,7 @@ test("GPT models are proxied to the ChatGPT Codex subscription endpoint", async 
   assert.equal(upstream.seen[0].body.model, "gpt-5.5");
 });
 
-test("ChatGPT Pro consultant route rewrites only the model slug before GPT subscription passthrough", async (t) => {
+test("deprecated chatgpt-pro-consult compatibility route rewrites only the model slug before GPT subscription passthrough", async (t) => {
   const upstream = await startMockChatgpt();
   t.after(() => upstream.server.close());
   const gateway = await startGateway({ CHATGPT_CODEX_BASE_URL: upstream.baseUrl });
@@ -287,7 +289,7 @@ test("ChatGPT Pro consultant route rewrites only the model slug before GPT subsc
   assert.equal(upstream.seen[0].headers.authorization, "Bearer test-token");
 });
 
-test("compact chatgpt-pro alias uses the same bounded consultant passthrough route", async (t) => {
+test("compact chatgpt-pro alias uses the same deprecated compatibility passthrough route", async (t) => {
   const upstream = await startMockChatgpt();
   t.after(() => upstream.server.close());
   const gateway = await startGateway({ CHATGPT_CODEX_BASE_URL: upstream.baseUrl });

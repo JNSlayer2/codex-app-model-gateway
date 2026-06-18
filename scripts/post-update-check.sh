@@ -21,7 +21,7 @@ if [ -z "$GW_DIR" ]; then
     [ -f "$c/server.js" ] && { GW_DIR="$(cd "$c" && pwd)"; break; }
   done
 fi
-EXPECT_SLUGS=(gpt-5.5 chatgpt-pro-consult opus-4-7 opus-4-8 sonnet-4-6 haiku-4-6 fable-5 grok-build minimax-m3)
+EXPECT_SLUGS=(gpt-5.5 opus-4-7 opus-4-8 sonnet-4-6 haiku-4-6 fable-5 grok-build minimax-m3)
 NODE_BIN="$(command -v node || true)"
 
 full=0; [ "${1:-}" = "--full" ] && full=1
@@ -94,10 +94,15 @@ echo "[3] model catalog"
 if curl_retry "$GATEWAY_URL/v1/models" >/tmp/puc_models.json 2>/dev/null; then
   miss=""; for s in "${EXPECT_SLUGS[@]}"; do [ -n "$NODE_BIN" ] && json_has_model /tmp/puc_models.json "$s" >/dev/null 2>&1 || miss="$miss $s"; done
   [ -z "$miss" ] && pass "expected slugs 齊全" || warn "catalog 缺:$miss"
-  if [ -n "$NODE_BIN" ] && json_expr /tmp/puc_models.json '(j.models||[]).some(m=>m.slug==="chatgpt-pro-consult" && m.capabilities && m.capabilities.role==="codex_native_consultant" && m.capabilities.upstream_model==="gpt-5.5")' >/dev/null 2>&1; then
-    pass "chatgpt-pro-consult 顧問 route 標記正確"
+  if [ -n "$NODE_BIN" ] && json_expr /tmp/puc_models.json '!(j.models||[]).some(m=>m.slug==="chatgpt-pro-consult")' >/dev/null 2>&1; then
+    pass "chatgpt-pro-consult 已從 catalog/dropdown 隱藏"
   else
-    warn "chatgpt-pro-consult catalog metadata 異常"
+    warn "chatgpt-pro-consult 仍出現在 catalog，會誤導為獨立 Pro 模型"
+  fi
+  if [ -n "$NODE_BIN" ] && json_expr /tmp/puc_health.json 'j.routes && j.routes["chatgpt-pro-consult"] && j.routes["chatgpt-pro-consult"].listed_in_catalog===false && j.routes["chatgpt-pro-consult"].deprecated===true && j.routes["chatgpt-pro-consult"].replaced_by==="gpt-5.5"' >/dev/null 2>&1; then
+    pass "chatgpt-pro-consult hidden compat route 保留給舊 thread"
+  else
+    warn "chatgpt-pro-consult hidden compat route metadata 異常"
   fi
   not_low="$([ -n "$NODE_BIN" ] && json_expr /tmp/puc_models.json '(j.models||[]).filter(m=>(m.default_reasoning_level||"")!=="low").map(m=>m.slug).join(" ")' 2>/dev/null || echo "")"
   [ -z "$not_low" ] && pass "all catalog default_reasoning_level = low" || warn "catalog 有非 low default_reasoning_level:$not_low"
@@ -106,16 +111,16 @@ else warn "/v1/models 連不上"; fi
 echo "[4] codex debug models（config 端到端接通）"
 if command -v codex >/dev/null 2>&1; then
   codex debug models -c model_provider='"model_gateway"' >/tmp/puc_codex_models.json 2>/dev/null \
-    && [ -n "$NODE_BIN" ] && json_has_model /tmp/puc_codex_models.json chatgpt-pro-consult >/dev/null 2>&1 \
+    && [ -n "$NODE_BIN" ] && json_has_model /tmp/puc_codex_models.json gpt-5.5 >/dev/null 2>&1 \
     && pass "codex 看得到 gateway catalog" || { warn "codex 看不到 gateway catalog"; note "config parse error 或被更新重設；檢查 [model_providers.model_gateway]"; }
 else note "codex CLI 不在 PATH，略過"; fi
 
 echo "[5] GPT passthrough route（401 無授權 = 正確 fail-closed）"
 b=$(curl_stream_retry "$GATEWAY_URL/v1/responses" -H 'content-type: application/json' \
   -d '{"model":"chatgpt-pro-consult","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"x"}]}],"stream":true}' 2>/dev/null)
-if printf '%s' "$b" | grep -q 'requires Codex ChatGPT Authorization'; then pass "GPT route 活著且正確 fail-closed"
+if printf '%s' "$b" | grep -q 'requires Codex ChatGPT Authorization'; then pass "deprecated chatgpt-pro-consult compat route 活著且正確 fail-closed"
 elif printf '%s' "$b" | grep -q 'response.completed'; then pass "GPT route 回了完整回應"
-else warn "GPT route 回應異常"; note "'not implemented'→gateway 退版；404→config provider 沒接上"; fi
+else warn "GPT route 回應異常"; note "'not implemented'→gateway 退版；404→hidden compat route 未保留或 config provider 沒接上"; fi
 
 echo "[5b] auth/session 健康度（refresh-token 輪換競爭預警）"
 main_auth="$SAFE_CODEX_HOME/auth.json"

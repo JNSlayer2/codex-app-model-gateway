@@ -225,6 +225,30 @@ fi
 
 # 5) (re)load the gateway
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+
+# If another same-user gateway process is still listening on the configured
+# port, launchctl bootstrap can fail with a vague "Input/output error". Stop
+# only stale gateway-shaped listeners; never kill arbitrary processes.
+if command -v lsof >/dev/null 2>&1; then
+  stale_pid="$(lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)"
+  if [ -n "$stale_pid" ]; then
+    stale_cmd="$(ps -p "$stale_pid" -o command= -ww 2>/dev/null || true)"
+    case "$stale_cmd" in
+      *"$GW_DIR/server.js"*|*"model-gateway/server.js"*|*"codex-app-model-gateway/runtime/server.js"*)
+        c_warn "port $PORT 仍被舊 gateway process 佔用，停止 pid=$stale_pid 後重載"
+        kill "$stale_pid" 2>/dev/null || true
+        for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+          lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1 || break
+          sleep 0.25
+        done
+        ;;
+      *)
+        die "port $PORT 已被非 gateway process 佔用；請先停止該服務後重跑安裝器"
+        ;;
+    esac
+  fi
+fi
+
 launchctl bootstrap "gui/$(id -u)" "$PLIST" || die "launchctl bootstrap 失敗"
 c_ok "gateway 已載入 launchd"
 
@@ -234,8 +258,8 @@ curl --retry 15 --retry-delay 1 --retry-connrefused -fsS --max-time 8 "$URL/heal
   && "$NODE_BIN" -e 'const j=require("fs").readFileSync(process.argv[1],"utf8"); process.exit(JSON.parse(j).ok===true?0:1)' /tmp/install-health.json \
   && c_ok "healthz ok" || { c_no "healthz 失敗"; ok=0; }
 curl -fsS --max-time 6 "$URL/v1/models" >/tmp/install-models.json 2>/dev/null \
-  && "$NODE_BIN" -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); const slugs=(j.models||[]).map(m=>m.slug); process.exit(slugs.includes("gpt-5.5")&&slugs.includes("chatgpt-pro-consult")?0:1)' /tmp/install-models.json \
-  && c_ok "catalog 列出 gpt-5.5 + chatgpt-pro-consult" || { c_no "catalog 異常"; ok=0; }
+  && "$NODE_BIN" -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); const slugs=(j.models||[]).map(m=>m.slug); process.exit(slugs.includes("gpt-5.5")&&!slugs.includes("chatgpt-pro-consult")?0:1)' /tmp/install-models.json \
+  && c_ok "catalog 列出 gpt-5.5 且隱藏 chatgpt-pro-consult" || { c_no "catalog 異常"; ok=0; }
 if [ -n "$CODEX_BIN" ]; then
   "$CODEX_BIN" debug models -c model_provider='"model_gateway"' >/tmp/install-codex-models.json 2>/dev/null \
     && "$NODE_BIN" -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); const slugs=(j.models||[]).map(m=>m.slug); process.exit(slugs.includes("gpt-5.5")?0:1)' /tmp/install-codex-models.json \

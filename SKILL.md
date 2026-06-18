@@ -9,7 +9,7 @@ metadata:
 
 > **免責聲明 / Disclaimer**：本工具讓你在自己付費的 Codex App 內把模型切到 Claude / Grok，並讓 GPT 透過你**自己的** ChatGPT 訂閱 session 繼續運作。它只代理「你自己已登入」的 session，不分發、不竊取任何憑證。但「以本機 proxy 轉發 ChatGPT 訂閱 session」可能牴觸 OpenAI ChatGPT 訂閱條款（訂閱條款對自動化／代理／非官方介面通常比 API 條款更嚴）；Claude CLI / Grok CLI 的包裝亦各受其供應商條款約束。**是否使用、是否合規由你自負**，請先自行確認 OpenAI / Anthropic / xAI 當前條款。本 repo 是 public-safe reference；實際帳號、憑證、tunnel 與本機 state 必須留在使用者自己的機器。工具按「現狀（as-is）」提供，無任何擔保。
 
-目標是讓 Codex App 只使用一個穩定 provider：`model_gateway`。同一條 thread 內只切換 `model`，不切換 provider。GPT 走 Codex ChatGPT subscription passthrough；`chatgpt-pro-consult` 是 **GPT-5.5 Codex fast consult / Pro-account fast consult** route（只把上游 model 改寫成 `gpt-5.5`，保留同 thread / headers / tools），**不可宣稱等同 ChatGPT App Deep Research**；Claude `opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6`、`fable-5` 走 Claude CLI adapter，display name 用 `opus4.7`、`opus4.8`、`sonnet4.6`、`haiku4.6`、`fable5`；所有工具能力都由 Codex App request-scoped tool bridge 掌握。
+目標是讓 Codex App 只使用一個穩定 provider：`model_gateway`。同一條 thread 內只切換 `model`，不切換 provider。GPT 走 Codex ChatGPT subscription passthrough；日常 GPT fast consult 直接用 `gpt-5.5`。`chatgpt-pro-consult` 已降級為 **hidden/deprecated compatibility alias**（舊 thread 若仍送這個 model，gateway 只改寫成 `gpt-5.5`），不再出現在 `/v1/models` catalog / dropdown，**不可宣稱等同 ChatGPT App Deep Research**；Claude `opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6`、`fable-5` 走 Claude CLI adapter，display name 用 `opus4.7`、`opus4.8`、`sonnet4.6`、`haiku4.6`、`fable5`；所有工具能力都由 Codex App request-scoped tool bridge 掌握。
 
 **穩定交付的 UI 定義**：不只 gateway health、catalog 與 live smoke 要綠，Codex App 左側專案列表也不能因 provider split 顯示「沒有聊天」。若全域 `model_provider` 已切到 `model_gateway`，未封存 `openai` threads 必須經一次性備份後合併到 `model_gateway`，否則 App 可能只顯示 gateway threads，讓舊專案看似消失。
 
@@ -73,11 +73,11 @@ bash scripts/post-update-check.sh --full
 
 `RPO` 在本 skill 中指 **Research / Plan / Operate**。v4 要同時支援兩條互補路線，避免 ChatGPT Pro、Codex App 與外部 reviewer 之間出現資訊斷層：
 
-1. **GPT-5.5 Codex fast consult / Pro-account fast consult（Codex → ChatGPT subscription，日常主線）**
-   - Catalog slug：`chatgpt-pro-consult`；display name：`ChatGPT Pro Consult`；compat alias：`chatgpt-pro`。
-   - 這不是新 provider、不是 ChatGPT Web 自動化，也不是 API key route；gateway 只把 request body 的 `model` 改成上游 `gpt-5.5`，其餘 Codex session headers、thread/tool context、MCP tool results 原封 passthrough。
-   - 用途是 Codex 主控下的 bounded consultant / critique / plan / risk lane；`pro_research_equivalence=false`，不得宣稱等同 ChatGPT App Deep Research。
-   - App 起手式：普通實作、測試、修 bug 預設留在 Codex executor；需要研究級規劃、架構裁決、claim/evidence/rebuttal 或高風險決策時切到 `ChatGPT Pro Consult`；方案定案後切回 executor 落地。
+1. **GPT-5.5 Codex fast consult（Codex → ChatGPT subscription，日常主線）**
+   - Catalog slug：`gpt-5.5`；日常 GPT 顧問、planning、review 直接用它，不再另外放一個「ChatGPT Pro Consult」dropdown。
+   - `chatgpt-pro-consult` / `chatgpt-pro` 只保留為 hidden/deprecated compatibility alias：舊 thread 若仍送這個 model，gateway 只把 request body 的 `model` 改成上游 `gpt-5.5`，其餘 Codex session headers、thread/tool context、MCP tool results 原封 passthrough。
+   - 這不是新 provider、不是 ChatGPT Web 自動化，也不是 API key route；`pro_research_equivalence=false`，不得宣稱等同 ChatGPT App Deep Research。
+   - App 起手式：普通實作、測試、修 bug 預設留在 Codex executor；需要 GPT review/critique 時切 `gpt-5.5`；需要真正研究級 Deep Research 時走 `ProResearchJobV1`。
 2. **Codex-native GPT route（Codex → ChatGPT Pro subscription）**
    - `gpt-*` / official OpenAI-family text slugs 仍走 Codex App 的 ChatGPT subscription passthrough。
    - `requires_openai_auth = true` 必須保留，讓 Codex App 自己帶 session；這不是 OpenAI API key，也不是把 ChatGPT token 交給外部模型。
@@ -103,13 +103,13 @@ bash scripts/post-update-check.sh --full
 
 完成時必須同時滿足：
 
-- `model_gateway` 的 `/v1/models` 與 `codex debug models -c model_provider='"'"'"model_gateway"'"'"'` 同時列出 `gpt-5.5`、`chatgpt-pro-consult`、`opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6`、`fable-5`、`grok-build`、`minimax-m3`，且 Claude display name 不帶 `claude-` 前綴。
+- `model_gateway` 的 `/v1/models` 與 `codex debug models -c model_provider='"'"'"model_gateway"'"'"'` 同時列出 `gpt-5.5`、`opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6`、`fable-5`、`grok-build`、`minimax-m3`，且 Claude display name 不帶 `claude-` 前綴；`chatgpt-pro-consult` 不得出現在 catalog / dropdown。
 - `/v1/models` 的每個 route capability 暴露 `author_model`、`decision_model`、`executor_host`、`authority_mode`、`patch_proposal`；外部模型 route 的 `decision_model` 不得被誤標為 GPT。
 - `/healthz` 標明 OpenAI/GPT 是 `passthrough`，Claude 是 `prompt_bridge_experimental`，不能把 Claude 說成官方等級 passthrough；`/healthz.capabilities` 與 `/healthz.routes` 也要暴露 authority metadata。
-- `chatgpt-pro-consult` 明確標示 `pro_research_equivalence=false`；`/healthz.pro_research_lane.kind` 是 `ProResearchJobV1` 且 `sync_responses_model=false`。
+- `/healthz.routes.chatgpt-pro-consult` 若存在，必須標示 `listed_in_catalog=false`、`deprecated=true`、`replaced_by="gpt-5.5"`、`pro_research_equivalence=false`；`/healthz.pro_research_lane.kind` 是 `ProResearchJobV1` 且 `sync_responses_model=false`。
 - 五個 Claude slug 都至少跑一次 `/v1/responses` 極短 smoke test，看到 `response.completed`。Grok CLI 可用時，`grok-build` 也要跑一次同等 smoke。
 - Claude 文字回覆必須送出 assistant message 的 `response.output_item.done`，不能只有 `response.output_item.added` 或 `response.output_text.done`；否則 Codex App 可能完成 turn 但不落盤可見回覆。
-- app-server 層建立 thread 時 `modelProvider` 是 `model_gateway`；後續 `turn/start` 只改 `model`，能在同一 thread 內先跑 `chatgpt-pro-consult` / GPT 再跑 Claude，最後切回 `chatgpt-pro-consult`。
+- app-server 層建立 thread 時 `modelProvider` 是 `model_gateway`；後續 `turn/start` 只改 `model`，能在同一 thread 內先跑 `gpt-5.5` / GPT 再跑 Claude，最後切回 `gpt-5.5`。
 - Codex App 左側專案列表不因 provider split 遺失既有未封存 threads；`post-update-check.sh` 的 sidebar provider coherence 必須通過。
 - Gateway 對大型 context request 不得 reset socket 造成 Codex App `stream disconnected before completion` retry storm；超過上限時要回乾淨的 `413`。預設 body 上限是 `64MB`，可用 `GATEWAY_MAX_BODY_BYTES` 覆寫。
 - Claude/Grok backend 的登入、OAuth、quota、session limit 這類使用者可處理狀態，不得用 streaming `response.failed` 回給 Codex App；要轉成可見的 completed assistant message，避免 App 誤判為 stream 斷線並重試。
@@ -180,7 +180,7 @@ requires_openai_auth = true
 
 Gateway 依 `request.model` 分流：
 
-- `chatgpt-pro-consult` / `chatgpt-pro`：Codex-native 顧問 route；gateway 只把上游 model 改寫成 `gpt-5.5`，保留官方 Codex tools、MCP、computer use、plan/goal mode 與同 thread continuity。
+- `chatgpt-pro-consult` / `chatgpt-pro`：hidden/deprecated compatibility route；gateway 只把上游 model 改寫成 `gpt-5.5`，保留官方 Codex tools、MCP、computer use、plan/goal mode 與同 thread continuity，但不列入 dropdown。日常直接選 `gpt-5.5`。
 - `gpt-*` 與 `codex-auto-review`：原封不動 proxy 到 Codex ChatGPT subscription Responses endpoint，保留官方 Codex tools、MCP、computer use、plan/goal mode 與未來 Codex App 功能。
 - `opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6`、`fable-5`：呼叫 Claude CLI，使用 `--no-session-persistence`、空 MCP config、停用 slash commands、禁止 Claude 原生工具執行。`opus4.7`、`opus4.8`、`sonnet4.6`、`haiku4.6`、`fable5` 可作為相容 alias，但 catalog slug 保留 Codex 已驗證可解析的 hyphen form。
 - Grok `grok-build`：呼叫 Grok CLI，保留 Grok CLI 自己的模型命名，gateway request 內停用 plan/memory/web search/native tools；Codex tools 仍只走 request-scoped prompt bridge。
@@ -297,18 +297,18 @@ Claude quota 尚未 reset 時，只驗證非 Claude live 項目：
 MODEL_GATEWAY_DIR=<gateway-dir> RUN_CLAUDE_SMOKE=0 bash scripts/live-verify-codex-gateway.sh
 ```
 
-`scripts/live-verify-codex-gateway.sh` 會呼叫 `scripts/app-server-same-thread-smoke.js` 驗證同一條 app-server thread 可依序跑 `chatgpt-pro-consult -> opus-4-7 -> opus-4-8 -> sonnet-4-6 -> haiku-4-6 -> chatgpt-pro-consult`，且核心 Claude slug 都能讀到 ChatGPT Pro Consult 前一輪放入的驗收碼。`fable-5` 另由 live smoke 驗證；若上游回「目前不可用」，gateway 必須用可見 completed notice 表達，不能用 `response.failed` 造成 retry loop。可用 `SAME_THREAD_CLAUDE_MODELS=opus-4-7,opus-4-8,sonnet-4-6,haiku-4-6,fable-5` 在 Fable 可用時把它納入 same-thread 驗收。
+`scripts/live-verify-codex-gateway.sh` 會呼叫 `scripts/app-server-same-thread-smoke.js` 驗證同一條 app-server thread 可依序跑 `gpt-5.5 -> opus-4-7 -> opus-4-8 -> sonnet-4-6 -> haiku-4-6 -> gpt-5.5`，且核心 Claude slug 都能讀到 GPT 前一輪放入的驗收碼。`chatgpt-pro-consult` 只做 hidden compat route / 401 fail-closed 檢查；`fable-5` 另由 live smoke 驗證；若上游回「目前不可用」，gateway 必須用可見 completed notice 表達，不能用 `response.failed` 造成 retry loop。可用 `SAME_THREAD_CLAUDE_MODELS=opus-4-7,opus-4-8,sonnet-4-6,haiku-4-6,fable-5` 在 Fable 可用時把它納入 same-thread 驗收。
 完整驗收不得設定 `RUN_CLAUDE_SMOKE=0` 或 `RUN_SAME_THREAD_SMOKE=0`；跳過模式只用於 quota reset 前確認非 Claude 路徑沒有退化。
 
 Catalog：
 
 ```bash
 curl -fsS http://127.0.0.1:4177/v1/models \
-  | jq -r '.models[]? | select(.slug|test("^(gpt-5.5|chatgpt-pro-consult|opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6|fable-5|grok-build|minimax-m3)$")) | [.slug,.display_name,.capabilities.backend,.capabilities.codex_tools] | @tsv'
+  | jq -r '.models[]? | select(.slug|test("^(gpt-5.5|opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6|fable-5|grok-build|minimax-m3)$")) | [.slug,.display_name,.capabilities.backend,.capabilities.codex_tools] | @tsv'
 
 codex debug models -c model_provider='"model_gateway"' \
   | jq -r '.models[]?.slug' \
-  | rg '^(gpt-5\.5|chatgpt-pro-consult|opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6|fable-5|grok-build|minimax-m3)$'
+  | rg '^(gpt-5\.5|opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6|fable-5|grok-build|minimax-m3)$'
 ```
 
 Claude slug smoke：
@@ -334,8 +334,8 @@ npm test -- --test-name-pattern 'Claude text responses'
 app-server same-thread 驗收要檢查這三件事：
 
 - `thread/start` response 的 `modelProvider` 是 `model_gateway`。
-- 第一個 `turn/start` 用 `model: "chatgpt-pro-consult"` 成功。
-- 同一個 `threadId` 後續 `turn/start` 分別用 `opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6` 成功讀到前文，最後再切回 `chatgpt-pro-consult` 成功。
+- 第一個 `turn/start` 用 `model: "gpt-5.5"` 成功。
+- 同一個 `threadId` 後續 `turn/start` 分別用 `opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6` 成功讀到前文，最後再切回 `gpt-5.5` 成功。
 
 ## 失敗處理
 

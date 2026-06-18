@@ -30,9 +30,14 @@ const gptRoutes = {
     display_name: "ChatGPT Pro Consult",
     priority: 101,
     upstream_model: "gpt-5.5",
-    role: "codex_native_consultant",
+    role: "deprecated_gpt55_alias",
+    listed: false,
+    deprecated: true,
+    replaced_by: "gpt-5.5",
+    deprecated_reason:
+      "Hidden compatibility alias only. It is the same GPT-5.5 Codex subscription passthrough and must not appear as a separate dropdown model.",
     description:
-      "GPT-5.5 Codex fast consult / Pro-account fast consult lane. Uses the same Codex ChatGPT subscription passthrough as GPT-5.5 for bounded planning, critique, and review; not equivalent to ChatGPT App Deep Research.",
+      "Deprecated hidden compatibility alias for GPT-5.5 Codex subscription passthrough; not equivalent to ChatGPT App Deep Research.",
   },
   "gpt-5.5": { display_name: "GPT-5.5", priority: 100 },
   "gpt-5.4": { display_name: "GPT-5.4", priority: 99 },
@@ -331,7 +336,7 @@ function buildModelEntry(slug, displayName, priority, o) {
     model: slug,
     display_name: displayName,
     description: o.description,
-    visibility: "list",
+    visibility: o.visibility || "list",
     supported_in_api: true,
     default_reasoning_level: DEFAULT_REASONING_LEVEL,
     supported_reasoning_levels: reasoningLevels,
@@ -369,7 +374,9 @@ function buildModelEntry(slug, displayName, priority, o) {
 }
 
 function modelsPayload() {
-  const gptModels = Object.entries(gptRoutes).map(([slug, route]) =>
+  const gptModels = Object.entries(gptRoutes)
+    .filter(([, route]) => route.listed !== false)
+    .map(([slug, route]) =>
     buildModelEntry(slug, route.display_name, route.priority, {
       description:
         route.description ||
@@ -393,6 +400,8 @@ function modelsPayload() {
         isolation: route.role ? "codex_first_party_same_thread" : "codex_first_party",
         role: route.role || "codex_primary",
         upstream_model: route.upstream_model || slug,
+        ...(route.deprecated === undefined ? {} : { deprecated: route.deprecated }),
+        ...(route.replaced_by === undefined ? {} : { replaced_by: route.replaced_by }),
         ...gptAuthorityMetadata(slug, route),
       },
     }),
@@ -559,6 +568,10 @@ function healthPayload() {
             passthrough: true,
             role: route.role || "codex_primary",
             upstream_model: route.upstream_model || slug,
+            listed_in_catalog: route.listed !== false,
+            ...(route.deprecated === undefined ? {} : { deprecated: route.deprecated }),
+            ...(route.replaced_by === undefined ? {} : { replaced_by: route.replaced_by }),
+            ...(route.deprecated_reason === undefined ? {} : { deprecated_reason: route.deprecated_reason }),
             ...gptAuthorityMetadata(slug, route),
           },
         ]),

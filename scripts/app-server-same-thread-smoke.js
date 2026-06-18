@@ -8,7 +8,7 @@ const path = require("node:path");
 
 const timeoutMs = Number(process.env.APP_SERVER_SAME_THREAD_TIMEOUT_MS || 600000);
 const code = `CODEX_GATEWAY_CONTEXT_${Date.now()}`;
-const gptModel = process.env.SAME_THREAD_GPT_MODEL || "chatgpt-pro-consult";
+const gptModel = process.env.SAME_THREAD_GPT_MODEL || "gpt-5.5";
 const claudeThreadModels = (process.env.SAME_THREAD_CLAUDE_MODELS || "opus-4-7,opus-4-8,sonnet-4-6,haiku-4-6")
   .split(",")
   .map((model) => model.trim())
