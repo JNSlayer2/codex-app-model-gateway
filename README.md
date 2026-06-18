@@ -7,6 +7,7 @@ Use a **single provider** `model_gateway` for Codex App, and switch between **Ch
 ## v4 highlights
 
 - Adds `chatgpt-pro-consult` / `chatgpt-pro` as a Codex-native ChatGPT Pro consultant route backed by the existing GPT subscription passthrough; only the upstream `model` is rewritten to `gpt-5.5`.
+- Recommended Codex App usage: keep a Codex executor model as the default for ordinary implementation/testing turns; switch to `ChatGPT Pro Consult` for research-grade planning, architecture review, claim/evidence/rebuttal checks, or high-risk decisions; switch back to the executor for file/shell/git/test side effects.
 - Adds `fable-5` / `fable5` as a Claude-family premium route backed by the Claude CLI candidate `claude-fable-5`.
 - Keeps the one-provider design: select `model_gateway` once, then switch `model` inside a thread.
 - Carries long-turn hardening for heavy multi-model work: semantic `response.in_progress` heartbeats, clean `413` for oversized bodies, and safe GPT passthrough cancellation.

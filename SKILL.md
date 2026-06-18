@@ -59,6 +59,7 @@ bash scripts/post-update-check.sh --full
    - Catalog slug：`chatgpt-pro-consult`；display name：`ChatGPT Pro Consult`；compat alias：`chatgpt-pro`。
    - 這不是新 provider、不是 ChatGPT Web 自動化，也不是 API key route；gateway 只把 request body 的 `model` 改成上游 `gpt-5.5`，其餘 Codex session headers、thread/tool context、MCP tool results 原封 passthrough。
    - 用途是 Codex 主控下的 bounded consultant / critique / plan / risk lane；Codex 仍是唯一 side-effect executor。
+   - App 起手式：普通實作、測試、修 bug 預設留在 Codex executor；需要研究級規劃、架構裁決、claim/evidence/rebuttal 或高風險決策時切到 `ChatGPT Pro Consult`；方案定案後切回 executor 落地。
 2. **Codex-native GPT route（Codex → ChatGPT Pro subscription）**
    - `gpt-*` / official OpenAI-family text slugs 仍走 Codex App 的 ChatGPT subscription passthrough。
    - `requires_openai_auth = true` 必須保留，讓 Codex App 自己帶 session；這不是 OpenAI API key，也不是把 ChatGPT token 交給外部模型。
