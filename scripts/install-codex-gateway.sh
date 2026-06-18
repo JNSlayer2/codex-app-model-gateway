@@ -30,6 +30,7 @@ GROK_TIMEOUT_MS="${GROK_TIMEOUT_MS:-300000}"
 # (but healthy) bulk fan-out responses as network errors.
 MINIMAX_TIMEOUT_MS="${MINIMAX_TIMEOUT_MS:-480000}"
 GATEWAY_HEARTBEAT_MS="${GATEWAY_HEARTBEAT_MS:-15000}"
+API_ALLOWLIST="${GATEWAY_API_MODEL_ALLOWLIST-__unset__}"
 URL="http://$HOST:$PORT"
 USER_NAME="$(id -un)"
 LABEL="${GATEWAY_LABEL:-com.${USER_NAME}.codex-model-gateway}"
@@ -38,6 +39,16 @@ PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 # else a sibling "model-gateway". Override with MODEL_GATEWAY_DIR.
 GW_DIR="${MODEL_GATEWAY_DIR:-}"
 TS="$(date +%Y%m%d-%H%M%S)"
+
+# Fresh installs deny metered API fan-out by default. Repairs preserve an existing
+# launchd allowlist unless the caller explicitly provides GATEWAY_API_MODEL_ALLOWLIST.
+if [ "$API_ALLOWLIST" = "__unset__" ]; then
+  if [ -f "$PLIST" ]; then
+    API_ALLOWLIST="$(plutil -extract EnvironmentVariables.GATEWAY_API_MODEL_ALLOWLIST raw "$PLIST" 2>/dev/null || true)"
+  else
+    API_ALLOWLIST=""
+  fi
+fi
 
 c_ok(){ printf '  \033[32m✓\033[0m %s\n' "$1"; }
 c_no(){ printf '  \033[31m✗\033[0m %s\n' "$1"; }
@@ -77,6 +88,7 @@ CODEX_HOME_EFF="${CODEX_HOME:-$HOME/.codex}"
 MINIMAX_SECRET_FILE="${MINIMAX_API_KEY_FILE:-$HOME/.codex/secrets/minimax.env}"
 if [ -f "$MINIMAX_SECRET_FILE" ]; then
   c_ok "minimax key file present ($MINIMAX_SECRET_FILE)"
+  [ -n "$API_ALLOWLIST" ] || c_warn "minimax key 存在但 API allowlist 未設；minimax-m3 會 fail-closed。若確認是近吃到飽方案，可用 GATEWAY_API_MODEL_ALLOWLIST=minimax-near-unlimited-api 重跑安裝。"
 else
   c_warn "minimax key file 未偵測到 → minimax-m3 會出現在 catalog，但實際呼叫會 fail-closed。可建立 $MINIMAX_SECRET_FILE"
 fi
@@ -141,7 +153,7 @@ mkdir -p "$HOME/Library/LaunchAgents"
     <key>GATEWAY_HEARTBEAT_MS</key><string>${GATEWAY_HEARTBEAT_MS}</string>
     <key>MINIMAX_BASE_URL</key><string>https://api.minimax.io/v1</string>
     <key>MINIMAX_API_KEY_FILE</key><string>${MINIMAX_SECRET_FILE}</string>
-    <key>GATEWAY_API_MODEL_ALLOWLIST</key><string>minimax-near-unlimited-api</string>
+    <key>GATEWAY_API_MODEL_ALLOWLIST</key><string>${API_ALLOWLIST}</string>
 PLIST_EOF
   [ -n "$CLAUDE_BIN" ] && printf '    <key>CLAUDE_COMMAND</key><string>%s</string>\n' "$CLAUDE_BIN"
   [ -n "$GROK_BIN" ]   && printf '    <key>GROK_COMMAND</key><string>%s</string>\n' "$GROK_BIN"
@@ -219,11 +231,14 @@ c_ok "gateway 已載入 launchd"
 # 6) verify
 ok=1
 curl --retry 15 --retry-delay 1 --retry-connrefused -fsS --max-time 8 "$URL/healthz" >/tmp/install-health.json 2>/dev/null \
-  && [ "$(jq -r .ok /tmp/install-health.json 2>/dev/null)" = "true" ] && c_ok "healthz ok" || { c_no "healthz 失敗"; ok=0; }
-curl -fsS --max-time 6 "$URL/v1/models" 2>/dev/null | jq -e 'any(.models[]?; .slug=="gpt-5.5") and any(.models[]?; .slug=="chatgpt-pro-consult")' >/dev/null 2>&1 \
+  && "$NODE_BIN" -e 'const j=require("fs").readFileSync(process.argv[1],"utf8"); process.exit(JSON.parse(j).ok===true?0:1)' /tmp/install-health.json \
+  && c_ok "healthz ok" || { c_no "healthz 失敗"; ok=0; }
+curl -fsS --max-time 6 "$URL/v1/models" >/tmp/install-models.json 2>/dev/null \
+  && "$NODE_BIN" -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); const slugs=(j.models||[]).map(m=>m.slug); process.exit(slugs.includes("gpt-5.5")&&slugs.includes("chatgpt-pro-consult")?0:1)' /tmp/install-models.json \
   && c_ok "catalog 列出 gpt-5.5 + chatgpt-pro-consult" || { c_no "catalog 異常"; ok=0; }
 if [ -n "$CODEX_BIN" ]; then
-  "$CODEX_BIN" debug models -c model_provider='"model_gateway"' 2>/dev/null | jq -r '.models[]?.slug' | grep -q '^gpt-5\.5$' \
+  "$CODEX_BIN" debug models -c model_provider='"model_gateway"' >/tmp/install-codex-models.json 2>/dev/null \
+    && "$NODE_BIN" -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); const slugs=(j.models||[]).map(m=>m.slug); process.exit(slugs.includes("gpt-5.5")?0:1)' /tmp/install-codex-models.json \
     && c_ok "codex 看得到 gateway catalog" || c_warn "codex debug models 看不到 → 檢查 config parse"
 fi
 

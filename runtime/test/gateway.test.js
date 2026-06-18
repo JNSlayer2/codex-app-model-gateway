@@ -155,13 +155,26 @@ test("model catalog exposes GPT, ChatGPT Pro consultant, Claude, Grok, and MiniM
   assert.equal(proConsult.capabilities.role, "codex_native_consultant");
   assert.equal(proConsult.capabilities.upstream_model, "gpt-5.5");
   assert.equal(proConsult.capabilities.isolation, "codex_first_party_same_thread");
+  assert.equal(proConsult.capabilities.author_model, "gpt-5.5");
+  assert.equal(proConsult.capabilities.decision_model, "gpt-5.5");
+  assert.equal(proConsult.capabilities.executor_host, "codex-app");
+  assert.equal(proConsult.capabilities.authority_mode, "tool_intent_bridge");
+  assert.equal(proConsult.capabilities.pro_research_equivalence, false);
   const fable = catalog.models.find((model) => model.slug === "fable-5");
   assert.equal(fable.display_name, "fable5");
   assert.equal(fable.context_window, 200000);
   assert.equal(fable.capabilities.backend, "claude_cli");
+  assert.equal(fable.capabilities.author_model, "fable-5");
+  assert.equal(fable.capabilities.decision_model, "fable-5");
+  assert.equal(fable.capabilities.executor_host, "codex-app");
+  assert.equal(fable.capabilities.authority_mode, "tool_intent_bridge");
+  assert.equal(fable.capabilities.patch_proposal, "supported_by_model_output");
   const minimax = catalog.models.find((model) => model.slug === "minimax-m3");
   assert.equal(minimax.capabilities.backend, "minimax_api");
   assert.equal(minimax.capabilities.api_spend, "minimax-near-unlimited-api");
+  assert.equal(minimax.capabilities.author_model, "minimax-m3");
+  assert.equal(minimax.capabilities.executor_host, "codex-app");
+  assert.equal(minimax.capabilities.authority_mode, "tool_intent_bridge");
   assert.equal(minimax.context_window, 1000000);
 });
 
@@ -178,11 +191,31 @@ test("healthz exposes deny-by-default API spend policy", async (t) => {
     "minimax-near-unlimited-api",
   ]);
   assert.equal(health.capabilities.claude.backend, "claude_cli");
+  assert.equal(health.capabilities.claude.executor_host, "codex-app");
+  assert.equal(health.capabilities.claude.authority_mode, "tool_intent_bridge");
+  assert.equal(health.capabilities.claude.patch_proposal, "supported_by_model_output");
   assert.equal(health.routes["chatgpt-pro-consult"].backend, "chatgpt_subscription");
   assert.equal(health.routes["chatgpt-pro-consult"].role, "codex_native_consultant");
   assert.equal(health.routes["chatgpt-pro-consult"].upstream_model, "gpt-5.5");
+  assert.equal(health.routes["chatgpt-pro-consult"].pro_research_equivalence, false);
   assert.equal(health.capabilities.minimax.backend, "minimax_api");
   assert.equal(health.capabilities.minimax.spend_allowed, true);
+  assert.equal(health.pro_research_lane.kind, "ProResearchJobV1");
+  assert.equal(health.pro_research_lane.sync_responses_model, false);
+});
+
+test("default runtime and installer keep metered API fanout disabled until allowlisted", async (t) => {
+  const gateway = await startGateway();
+  t.after(async () => gateway.close());
+
+  const health = await requestJson(`http://127.0.0.1:${gateway.port}/healthz`);
+  assert.deepEqual(health.api_spend_policy.active_api_model_allowlist, []);
+  assert.equal(health.capabilities.minimax.spend_allowed, false);
+
+  const installScript = fs.readFileSync(path.resolve(__dirname, "../../scripts/install-codex-gateway.sh"), "utf8");
+  assert.doesNotMatch(installScript, /<key>GATEWAY_API_MODEL_ALLOWLIST<\/key><string>minimax-near-unlimited-api<\/string>/);
+  assert.match(installScript, /GATEWAY_API_MODEL_ALLOWLIST-__unset__/);
+  assert.match(installScript, /plutil -extract EnvironmentVariables\.GATEWAY_API_MODEL_ALLOWLIST raw/);
 });
 
 test("GPT models are proxied to the ChatGPT Codex subscription endpoint", async (t) => {

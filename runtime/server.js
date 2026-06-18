@@ -32,7 +32,7 @@ const gptRoutes = {
     upstream_model: "gpt-5.5",
     role: "codex_native_consultant",
     description:
-      "Codex-native ChatGPT Pro consultant lane. Uses the same Codex ChatGPT subscription passthrough as GPT-5.5, but is labeled for bounded research, planning, and review inside the current Codex thread.",
+      "GPT-5.5 Codex fast consult / Pro-account fast consult lane. Uses the same Codex ChatGPT subscription passthrough as GPT-5.5 for bounded planning, critique, and review; not equivalent to ChatGPT App Deep Research.",
   },
   "gpt-5.5": { display_name: "GPT-5.5", priority: 100 },
   "gpt-5.4": { display_name: "GPT-5.4", priority: 99 },
@@ -130,6 +130,67 @@ const reasoningLevels = [
 
 const gptBaseInstructions =
   "You are Codex, a coding agent based on GPT-5. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled.";
+
+const AUTHORITY_MODES = Object.freeze({
+  BRAIN_ONLY: "brain_only",
+  PATCH_PROPOSAL: "patch_proposal",
+  TOOL_INTENT_BRIDGE: "tool_intent_bridge",
+  SANDBOX_EXECUTOR: "sandbox_executor",
+  NATIVE_PEER_EXECUTOR: "native_peer_executor",
+});
+
+const PRO_RESEARCH_LANE = Object.freeze({
+  kind: "ProResearchJobV1",
+  lane: "chatgpt_pro_deep_research",
+  sync_responses_model: false,
+  default_authority_mode: AUTHORITY_MODES.BRAIN_ONLY,
+  handoff_contract:
+    "Codex/open-ultrawork creates a bounded research packet; the human runs ChatGPT Pro Deep Research; Codex imports source links, claims, and limitations for verification.",
+});
+
+function authorityMetadata({
+  authorModel,
+  decisionModel = authorModel,
+  executorHost = "codex-app",
+  authorityMode = AUTHORITY_MODES.TOOL_INTENT_BRIDGE,
+  patchProposal = false,
+  toolExecution = "codex_app_request_scoped",
+  proResearchEquivalence = undefined,
+} = {}) {
+  return {
+    author_model: authorModel,
+    decision_model: decisionModel,
+    executor_host: executorHost,
+    authority_mode: authorityMode,
+    patch_proposal: patchProposal,
+    tool_execution: toolExecution,
+    ...(proResearchEquivalence === undefined ? {} : { pro_research_equivalence: proResearchEquivalence }),
+  };
+}
+
+function gptAuthorityMetadata(slug, route = {}) {
+  const upstream = route.upstream_model || slug;
+  return authorityMetadata({
+    authorModel: upstream,
+    decisionModel: upstream,
+    executorHost: "codex-app",
+    authorityMode: AUTHORITY_MODES.TOOL_INTENT_BRIDGE,
+    patchProposal: "native_codex_model_output",
+    toolExecution: "codex_native_passthrough",
+    proResearchEquivalence: false,
+  });
+}
+
+function externalAuthorityMetadata(slug, patchProposal = "supported_by_model_output") {
+  return authorityMetadata({
+    authorModel: slug,
+    decisionModel: slug,
+    executorHost: "codex-app",
+    authorityMode: AUTHORITY_MODES.TOOL_INTENT_BRIDGE,
+    patchProposal,
+    toolExecution: "codex_app_request_scoped_prompt_bridge",
+  });
+}
 
 // Classify backend failures into a small, leak-free taxonomy for /healthz.
 // Order matters: auth before quota (e.g. "usage limit" wording near login hints),
@@ -332,6 +393,7 @@ function modelsPayload() {
         isolation: route.role ? "codex_first_party_same_thread" : "codex_first_party",
         role: route.role || "codex_primary",
         upstream_model: route.upstream_model || slug,
+        ...gptAuthorityMetadata(slug, route),
       },
     }),
   );
@@ -359,6 +421,7 @@ function modelsPayload() {
         backend: "claude_cli",
         api_spend: "cli_subscription_not_api_key",
         isolation: "ephemeral_request_only",
+        ...externalAuthorityMetadata(slug),
       },
     }),
   );
@@ -384,6 +447,7 @@ function modelsPayload() {
         backend: "grok_cli",
         api_spend: "cli_oauth_not_api_key",
         isolation: "ephemeral_request_only",
+        ...externalAuthorityMetadata(slug),
       },
     }),
   );
@@ -411,6 +475,7 @@ function modelsPayload() {
         api_spend: MINIMAX_API_SPEND_CLASS,
         min_context_window: route.guaranteed_context_window,
         isolation: "ephemeral_request_only",
+        ...externalAuthorityMetadata(slug),
       },
     }),
   );
@@ -436,6 +501,9 @@ function healthPayload() {
         codex_tools: "passthrough",
         computer_use: "passthrough",
         backend: "chatgpt_subscription",
+        executor_host: "codex-app",
+        authority_mode: AUTHORITY_MODES.TOOL_INTENT_BRIDGE,
+        patch_proposal: "native_codex_model_output",
       },
       claude: {
         text: CLAUDE_STREAMING ? "streaming" : "buffered",
@@ -446,6 +514,10 @@ function healthPayload() {
         computer_use: "prompt_bridge_experimental_when_codex_exposes_tool_schema",
         backend: "claude_cli",
         isolation: "ephemeral_request_only",
+        executor_host: "codex-app",
+        authority_mode: AUTHORITY_MODES.TOOL_INTENT_BRIDGE,
+        patch_proposal: "supported_by_model_output",
+        tool_execution: "codex_app_request_scoped_prompt_bridge",
       },
       grok: {
         text: "buffered",
@@ -454,6 +526,10 @@ function healthPayload() {
         computer_use: "prompt_bridge_experimental_when_codex_exposes_tool_schema",
         backend: "grok_cli",
         isolation: "ephemeral_request_only",
+        executor_host: "codex-app",
+        authority_mode: AUTHORITY_MODES.TOOL_INTENT_BRIDGE,
+        patch_proposal: "supported_by_model_output",
+        tool_execution: "codex_app_request_scoped_prompt_bridge",
       },
       minimax: {
         text: "buffered",
@@ -466,8 +542,13 @@ function healthPayload() {
         spend_allowed: minimaxSpendAllowed(),
         configured: Boolean(readMiniMaxApiKey()),
         isolation: "ephemeral_request_only",
+        executor_host: "codex-app",
+        authority_mode: AUTHORITY_MODES.TOOL_INTENT_BRIDGE,
+        patch_proposal: "supported_by_model_output",
+        tool_execution: "codex_app_request_scoped_prompt_bridge",
       },
     },
+    pro_research_lane: PRO_RESEARCH_LANE,
     routes: {
       ...Object.fromEntries(
         Object.entries(gptRoutes).map(([slug, route]) => [
@@ -478,6 +559,7 @@ function healthPayload() {
             passthrough: true,
             role: route.role || "codex_primary",
             upstream_model: route.upstream_model || slug,
+            ...gptAuthorityMetadata(slug, route),
           },
         ]),
       ),
@@ -487,6 +569,7 @@ function healthPayload() {
           {
             display_name: route.display_name,
             backend_candidates: route.candidates,
+            ...externalAuthorityMetadata(slug),
             ...publicRouteState(routeState[slug]),
           },
         ]),
@@ -497,6 +580,7 @@ function healthPayload() {
           {
             display_name: route.display_name,
             backend_candidates: route.candidates,
+            ...externalAuthorityMetadata(slug),
             ...publicRouteState(grokRouteState[slug]),
           },
         ]),
@@ -510,6 +594,7 @@ function healthPayload() {
             api_spend: MINIMAX_API_SPEND_CLASS,
             spend_allowed: minimaxSpendAllowed(),
             configured: Boolean(readMiniMaxApiKey()),
+            ...externalAuthorityMetadata(slug),
             ...publicRouteState(minimaxRouteState[slug]),
           },
         ]),

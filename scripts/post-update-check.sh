@@ -22,39 +22,49 @@ if [ -z "$GW_DIR" ]; then
   done
 fi
 EXPECT_SLUGS=(gpt-5.5 chatgpt-pro-consult opus-4-7 opus-4-8 sonnet-4-6 haiku-4-6 fable-5 grok-build minimax-m3)
+NODE_BIN="$(command -v node || true)"
 
 full=0; [ "${1:-}" = "--full" ] && full=1
 fails=0
 pass(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; }
 warn(){ printf '  \033[31mFAIL\033[0m %s\n' "$1"; fails=$((fails+1)); }
 note(){ printf '       \342\206\263 %s\n' "$1"; }
+json_expr(){ "$NODE_BIN" -e 'const fs=require("fs"); const file=process.argv[1]; const expr=process.argv[2]; const j=JSON.parse(fs.readFileSync(file,"utf8")); const result=Function("j","return ("+expr+")")(j); if (result === undefined || result === null) process.exit(1); if (typeof result === "boolean") process.exit(result ? 0 : 1); console.log(result);' "$1" "$2"; }
+json_has_model(){ "$NODE_BIN" -e 'const fs=require("fs"); const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); const slug=process.argv[2]; process.exit((j.models||[]).some(m=>m.slug===slug)?0:1);' "$1" "$2"; }
+curl_retry(){ curl --retry 12 --retry-delay 1 --retry-connrefused -fsS --max-time 6 "$@"; }
+curl_stream_retry(){ curl --retry 8 --retry-delay 1 --retry-connrefused -sS --max-time 12 -N "$@"; }
 
 echo "== Codex App model_gateway post-update / repair check =="
 echo "   gateway: $GATEWAY_URL   label: $LABEL   full=$full"
 echo
 
+if [ -z "$NODE_BIN" ]; then
+  warn "node 不在 PATH；gateway runtime 與 JSON 驗收都需要 node"
+  note "安裝 Node.js 後重跑 install-codex-gateway.sh"
+fi
+
 echo "[1] config provider（更新最可能重設這個）"
 for H in "$HOME/.codex" "${CODEX_HOME:-}"; do
   [ -z "$H" ] && continue; cfg="$H/config.toml"; [ -f "$cfg" ] || continue
-  if rg -q '^[[:space:]]*model_provider[[:space:]]*=[[:space:]]*"model_gateway"' "$cfg" 2>/dev/null; then
+  if grep -Eq '^[[:space:]]*model_provider[[:space:]]*=[[:space:]]*"model_gateway"' "$cfg" 2>/dev/null; then
     pass "model_provider = model_gateway  ($cfg)"
   else
     warn "model_provider 不是 model_gateway  ($cfg)"
     note "還原：cp <backup>/config.toml \"$cfg\"（備份在 \$HOME/.codex/*.bak-* 或 backups/）；或重跑 install-codex-gateway.sh"
   fi
-  if rg -q '^[[:space:]]*model_reasoning_effort[[:space:]]*=[[:space:]]*"low"' "$cfg" 2>/dev/null; then
+  if grep -Eq '^[[:space:]]*model_reasoning_effort[[:space:]]*=[[:space:]]*"low"' "$cfg" 2>/dev/null; then
     pass "model_reasoning_effort = low  ($cfg)"
   else
     warn "model_reasoning_effort 不是 low/fast  ($cfg)"
     note "修復：設 model_reasoning_effort = \"low\"；深度推理改在單條 thread/plan mode 調高"
   fi
-  if rg -q '^[[:space:]]*service_tier[[:space:]]*=[[:space:]]*"fast"' "$cfg" 2>/dev/null; then
+  if grep -Eq '^[[:space:]]*service_tier[[:space:]]*=[[:space:]]*"fast"' "$cfg" 2>/dev/null; then
     pass "service_tier = fast  ($cfg)"
   else
     warn "service_tier 不是 fast  ($cfg)"
     note "修復：設 service_tier = \"fast\"；切 gateway 後 UI fast 鍵不會由 catalog 補出"
   fi
-  if rg -q '^[[:space:]]*model_auto_compact_token_limit_scope[[:space:]]*=[[:space:]]*"total"' "$cfg" 2>/dev/null; then
+  if grep -Eq '^[[:space:]]*model_auto_compact_token_limit_scope[[:space:]]*=[[:space:]]*"total"' "$cfg" 2>/dev/null; then
     pass "auto-compact scope = total  ($cfg)"
   else
     warn "auto-compact scope 不是 total  ($cfg)"
@@ -63,9 +73,14 @@ for H in "$HOME/.codex" "${CODEX_HOME:-}"; do
 done
 
 echo "[2] gateway healthz（launchd 進程，App 更新殺不掉它）"
-if curl -fsS --max-time 6 "$GATEWAY_URL/healthz" >/tmp/puc_health.json 2>/dev/null; then
-  [ "$(jq -r .ok /tmp/puc_health.json 2>/dev/null)" = "true" ] && pass "healthz ok ($(jq -r .provider /tmp/puc_health.json))" || warn "healthz ok!=true"
-  if [ "$(jq -r '.capabilities.minimax.spend_allowed // false' /tmp/puc_health.json 2>/dev/null)" = "true" ]; then
+if curl_retry "$GATEWAY_URL/healthz" >/tmp/puc_health.json 2>/dev/null; then
+  if [ -n "$NODE_BIN" ] && json_expr /tmp/puc_health.json 'j.ok===true' >/dev/null 2>&1; then
+    provider="$(json_expr /tmp/puc_health.json 'j.provider || "unknown"' 2>/dev/null || echo unknown)"
+    pass "healthz ok ($provider)"
+  else
+    warn "healthz ok!=true"
+  fi
+  if [ -n "$NODE_BIN" ] && json_expr /tmp/puc_health.json '!!(j.capabilities && j.capabilities.minimax && j.capabilities.minimax.spend_allowed)' >/dev/null 2>&1; then
     pass "MiniMax API route allowlisted"
   else
     note "MiniMax API route 未 allowlist；minimax-m3 會 fail-closed，設 GATEWAY_API_MODEL_ALLOWLIST=minimax-near-unlimited-api 後重啟 gateway"
@@ -76,29 +91,30 @@ else
 fi
 
 echo "[3] model catalog"
-if curl -fsS --max-time 6 "$GATEWAY_URL/v1/models" >/tmp/puc_models.json 2>/dev/null; then
-  miss=""; for s in "${EXPECT_SLUGS[@]}"; do jq -e --arg s "$s" '.models[]?|select(.slug==$s)' /tmp/puc_models.json >/dev/null 2>&1 || miss="$miss $s"; done
+if curl_retry "$GATEWAY_URL/v1/models" >/tmp/puc_models.json 2>/dev/null; then
+  miss=""; for s in "${EXPECT_SLUGS[@]}"; do [ -n "$NODE_BIN" ] && json_has_model /tmp/puc_models.json "$s" >/dev/null 2>&1 || miss="$miss $s"; done
   [ -z "$miss" ] && pass "expected slugs 齊全" || warn "catalog 缺:$miss"
-  if jq -e '.models[]?|select(.slug=="chatgpt-pro-consult" and .capabilities.role=="codex_native_consultant" and .capabilities.upstream_model=="gpt-5.5")' /tmp/puc_models.json >/dev/null 2>&1; then
+  if [ -n "$NODE_BIN" ] && json_expr /tmp/puc_models.json '(j.models||[]).some(m=>m.slug==="chatgpt-pro-consult" && m.capabilities && m.capabilities.role==="codex_native_consultant" && m.capabilities.upstream_model==="gpt-5.5")' >/dev/null 2>&1; then
     pass "chatgpt-pro-consult 顧問 route 標記正確"
   else
     warn "chatgpt-pro-consult catalog metadata 異常"
   fi
-  not_low="$(jq -r '.models[]? | select((.default_reasoning_level // "") != "low") | .slug' /tmp/puc_models.json 2>/dev/null | paste -sd ' ' -)"
+  not_low="$([ -n "$NODE_BIN" ] && json_expr /tmp/puc_models.json '(j.models||[]).filter(m=>(m.default_reasoning_level||"")!=="low").map(m=>m.slug).join(" ")' 2>/dev/null || echo "")"
   [ -z "$not_low" ] && pass "all catalog default_reasoning_level = low" || warn "catalog 有非 low default_reasoning_level:$not_low"
 else warn "/v1/models 連不上"; fi
 
 echo "[4] codex debug models（config 端到端接通）"
 if command -v codex >/dev/null 2>&1; then
-  codex debug models -c model_provider='"model_gateway"' 2>/dev/null | jq -r '.models[]?.slug' | rg -q '^chatgpt-pro-consult$' \
+  codex debug models -c model_provider='"model_gateway"' >/tmp/puc_codex_models.json 2>/dev/null \
+    && [ -n "$NODE_BIN" ] && json_has_model /tmp/puc_codex_models.json chatgpt-pro-consult >/dev/null 2>&1 \
     && pass "codex 看得到 gateway catalog" || { warn "codex 看不到 gateway catalog"; note "config parse error 或被更新重設；檢查 [model_providers.model_gateway]"; }
 else note "codex CLI 不在 PATH，略過"; fi
 
 echo "[5] GPT passthrough route（401 無授權 = 正確 fail-closed）"
-b=$(curl -sS --max-time 12 -N "$GATEWAY_URL/v1/responses" -H 'content-type: application/json' \
+b=$(curl_stream_retry "$GATEWAY_URL/v1/responses" -H 'content-type: application/json' \
   -d '{"model":"chatgpt-pro-consult","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"x"}]}],"stream":true}' 2>/dev/null)
-if printf '%s' "$b" | rg -q 'requires Codex ChatGPT Authorization'; then pass "GPT route 活著且正確 fail-closed"
-elif printf '%s' "$b" | rg -q 'response.completed'; then pass "GPT route 回了完整回應"
+if printf '%s' "$b" | grep -q 'requires Codex ChatGPT Authorization'; then pass "GPT route 活著且正確 fail-closed"
+elif printf '%s' "$b" | grep -q 'response.completed'; then pass "GPT route 回了完整回應"
 else warn "GPT route 回應異常"; note "'not implemented'→gateway 退版；404→config provider 沒接上"; fi
 
 echo "[5b] auth/session 健康度（refresh-token 輪換競爭預警）"

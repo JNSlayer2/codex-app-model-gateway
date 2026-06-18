@@ -9,7 +9,7 @@ metadata:
 
 > **免責聲明 / Disclaimer**：本工具讓你在自己付費的 Codex App 內把模型切到 Claude / Grok，並讓 GPT 透過你**自己的** ChatGPT 訂閱 session 繼續運作。它只代理「你自己已登入」的 session，不分發、不竊取任何憑證。但「以本機 proxy 轉發 ChatGPT 訂閱 session」可能牴觸 OpenAI ChatGPT 訂閱條款（訂閱條款對自動化／代理／非官方介面通常比 API 條款更嚴）；Claude CLI / Grok CLI 的包裝亦各受其供應商條款約束。**是否使用、是否合規由你自負**，請先自行確認 OpenAI / Anthropic / xAI 當前條款。本 repo 是 public-safe reference；實際帳號、憑證、tunnel 與本機 state 必須留在使用者自己的機器。工具按「現狀（as-is）」提供，無任何擔保。
 
-目標是讓 Codex App 只使用一個穩定 provider：`model_gateway`。同一條 thread 內只切換 `model`，不切換 provider。GPT 走 Codex ChatGPT subscription passthrough；`chatgpt-pro-consult` 是 Codex-native ChatGPT Pro 顧問 route（只把上游 model 改寫成 `gpt-5.5`，保留同 thread / headers / tools）；Claude `opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6`、`fable-5` 走 Claude CLI adapter，display name 用 `opus4.7`、`opus4.8`、`sonnet4.6`、`haiku4.6`、`fable5`；所有工具能力都由 Codex App request-scoped tool bridge 掌握。
+目標是讓 Codex App 只使用一個穩定 provider：`model_gateway`。同一條 thread 內只切換 `model`，不切換 provider。GPT 走 Codex ChatGPT subscription passthrough；`chatgpt-pro-consult` 是 **GPT-5.5 Codex fast consult / Pro-account fast consult** route（只把上游 model 改寫成 `gpt-5.5`，保留同 thread / headers / tools），**不可宣稱等同 ChatGPT App Deep Research**；Claude `opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6`、`fable-5` 走 Claude CLI adapter，display name 用 `opus4.7`、`opus4.8`、`sonnet4.6`、`haiku4.6`、`fable5`；所有工具能力都由 Codex App request-scoped tool bridge 掌握。
 
 **穩定交付的 UI 定義**：不只 gateway health、catalog 與 live smoke 要綠，Codex App 左側專案列表也不能因 provider split 顯示「沒有聊天」。若全域 `model_provider` 已切到 `model_gateway`，未封存 `openai` threads 必須經一次性備份後合併到 `model_gateway`，否則 App 可能只顯示 gateway threads，讓舊專案看似消失。
 
@@ -17,21 +17,21 @@ metadata:
 
 > **給 AI 安裝代理（照這個跑）**：依序執行下面三步，以 exit code 判成敗（`0`=成功）。
 > 1. `bash scripts/install-codex-gateway.sh --preflight` — 只讀，列出本機缺的 CLI / 登入 / `CODEX_HOME` 雷。
-> 2. `MODEL_GATEWAY_DIR=<gateway-dir> bash scripts/install-codex-gateway.sh` — 實際安裝（偵測路徑→寫 plist+config→合併未封存 thread provider→載入→驗收）。
+> 2. `bash scripts/install-codex-gateway.sh` — 實際安裝（自動偵測 repo 內 `runtime/` → 寫 plist+config → 合併未封存 thread provider → 載入 → 驗收）。
 > 3. `bash scripts/post-update-check.sh` — 驗收，**必須 exit 0** 才算成功。
 >
 > **你（AI）不能代做的只有登入**：若 preflight 顯示需要 `codex login` 或 `grok login --oauth`，停下來請人類在終端機自己跑（互動式 OAuth），完成後再回到第 2/3 步。其餘全自動、idempotent、會備份、不碰 signed app bundle。
 
-新機器拿到本 skill 後，**先跑安裝器**——它會偵測本機 `node`/`claude`/`grok`/`codex` 的絕對路徑寫進 launchd plist，避開最常見的部署失敗（`spawn ENOENT`：launchd 的 PATH 沒有該 CLI 的安裝目錄，例如 grok 在 `~/.grok/bin`）。安裝器 idempotent、會先備份、不碰 signed app bundle。
+新機器拿到本 repo/skill 後，**先跑安裝器**——它會自動找到 repo 內 `runtime/`，偵測本機 `node`/`claude`/`grok`/`codex` 的絕對路徑寫進 launchd plist，避開最常見的部署失敗（`spawn ENOENT`：launchd 的 PATH 沒有該 CLI 的安裝目錄，例如 grok 在 `~/.grok/bin`）。安裝器 idempotent、會先備份、不碰 signed app bundle。
 
-前提：gateway runtime（`server.js` + `package.json` + `test/`）要先在機器上；放哪都行，用 `MODEL_GATEWAY_DIR` 指它（安裝器也會自動找 `../model-gateway`、`~/model-gateway`）。
+前提：gateway runtime（`runtime/server.js` + `package.json` + `test/`）已隨 public repo 附上；fresh clone 後在 repo root 直接跑安裝器即可，不需設定 `MODEL_GATEWAY_DIR`。只有把 runtime 放在 repo 外時才用 `MODEL_GATEWAY_DIR=<dir>` 覆寫。按量 API 的 fresh install 預設不 allowlist；即使有 Minimax key，`minimax-m3` 也會 fail-closed，除非人類確認是近吃到飽方案後用 `GATEWAY_API_MODEL_ALLOWLIST=minimax-near-unlimited-api` 重跑安裝。維修舊安裝時，安裝器會保留現有 launchd plist 的 allowlist，避免無意關掉已確認的本機低風險 route。
 
 ```bash
 # 0) dry-run：只讀，列出本機缺什麼（CLI、登入、CODEX_HOME 雷）
 bash scripts/install-codex-gateway.sh --preflight
 
-# 1) 安裝／修復：偵測路徑 → 寫 plist + 單一 provider config → 載入 → 驗收
-MODEL_GATEWAY_DIR=<gateway-dir> bash scripts/install-codex-gateway.sh
+# 1) 安裝／修復：偵測路徑 → 寫 plist + 單一 provider config → 載入 → 驗收（API fan-out 預設關閉）
+bash scripts/install-codex-gateway.sh
 
 # 2) 補手動登入（preflight 會列出本機缺哪個；這兩步無法自動代登）
 codex login            # GPT passthrough 需要
@@ -42,7 +42,7 @@ bash scripts/post-update-check.sh
 bash scripts/post-update-check.sh --full
 ```
 
-> **Codex App 更新後切換失效就用這個修**：先跑步驟 3 定位，再視需要重跑步驟 1。gateway 是 launchd 獨立進程，**App 更新殺不掉它**；更新最常壞的是 config provider 被重設或 CLI 路徑變動，安裝器都會自動處理。腳本相容 macOS 內建 bash 3.2（不依賴 bash 4 的關聯陣列）。
+> **Codex App 更新後切換失效就用這個修**：先跑步驟 3 定位，再視需要重跑步驟 1。gateway 是 launchd 獨立進程，**App 更新殺不掉它**；更新最常壞的是 config provider 被重設或 CLI 路徑變動，安裝器都會自動處理。腳本相容 macOS 內建 bash 3.2（不依賴 bash 4 的關聯陣列），快速驗收只依賴 `node`/`curl`/macOS 內建工具，不要求使用者另外裝 `jq` 或 `ripgrep`。
 
 ## v4：Fable5 route
 
@@ -51,14 +51,32 @@ bash scripts/post-update-check.sh --full
 - Default advertised context is `200000` unless the runtime has verified a larger Fable variant; do not over-advertise context from branding or hearsay.
 - `fable5` is a compatibility alias only. The catalog slug remains `fable-5` so threads switch model within the single `model_gateway` provider.
 
+## v4：模型主導權與執行宿主契約
+
+每個 catalog entry 與 `/healthz.routes` 必須把「誰在思考／寫 patch」和「誰在執行工具」分開標示：
+
+- `author_model`：實際產生方案、代碼、patch intent 或 reviewer judgment 的模型，例如 `opus-4-8`、`grok-build`、`minimax-m3`、`gpt-5.5`。
+- `decision_model`：該 artifact 的決策來源；預設等於 `author_model`。若日後有 committee / judge 才能不同。
+- `executor_host`：真正跑 shell、apply_patch、MCP、browser、computer-use 的宿主，例如 `codex-app`。這不是作者。
+- `authority_mode`：
+  - `brain_only`：只可回建議／批評／研究。
+  - `patch_proposal`：可輸出 unified diff / patch intent，由主控審核套用。
+  - `tool_intent_bridge`：可輸出工具意圖，Codex App 依當次 request tool schema 執行。
+  - `sandbox_executor`：只限隔離 worktree / allowlisted command。
+  - `native_peer_executor`：未來原生 peer runtime 才能用；本 gateway 不預設宣稱。
+- `patch_proposal`：是否可產生 patch proposal / tool intent。Claude/Grok/Minimax 預設可產生，但不代表它們直接寫入工作區。
+- `tool_execution`：外部模型 route 應為 `codex_app_request_scoped_prompt_bridge`；GPT passthrough 應為 `codex_native_passthrough`。
+
+重要語義：切到 Opus/Grok/Minimax/Fable 時，`author_model` 必須是該模型；Codex App 只是 `executor_host`。Codex 可以拒絕、驗證、套用或回滾外部模型的 patch/tool intent，但不得把 artifact 改標成 GPT 寫的，也不得把外部模型降格成「只能聊天」。
+
 ## v4：ChatGPT Pro / Codex MCP RPO bridge
 
 `RPO` 在本 skill 中指 **Research / Plan / Operate**。v4 要同時支援兩條互補路線，避免 ChatGPT Pro、Codex App 與外部 reviewer 之間出現資訊斷層：
 
-1. **Codex-native ChatGPT Pro consultant route（Codex → ChatGPT Pro subscription，日常主線）**
+1. **GPT-5.5 Codex fast consult / Pro-account fast consult（Codex → ChatGPT subscription，日常主線）**
    - Catalog slug：`chatgpt-pro-consult`；display name：`ChatGPT Pro Consult`；compat alias：`chatgpt-pro`。
    - 這不是新 provider、不是 ChatGPT Web 自動化，也不是 API key route；gateway 只把 request body 的 `model` 改成上游 `gpt-5.5`，其餘 Codex session headers、thread/tool context、MCP tool results 原封 passthrough。
-   - 用途是 Codex 主控下的 bounded consultant / critique / plan / risk lane；Codex 仍是唯一 side-effect executor。
+   - 用途是 Codex 主控下的 bounded consultant / critique / plan / risk lane；`pro_research_equivalence=false`，不得宣稱等同 ChatGPT App Deep Research。
    - App 起手式：普通實作、測試、修 bug 預設留在 Codex executor；需要研究級規劃、架構裁決、claim/evidence/rebuttal 或高風險決策時切到 `ChatGPT Pro Consult`；方案定案後切回 executor 落地。
 2. **Codex-native GPT route（Codex → ChatGPT Pro subscription）**
    - `gpt-*` / official OpenAI-family text slugs 仍走 Codex App 的 ChatGPT subscription passthrough。
@@ -69,9 +87,11 @@ bash scripts/post-update-check.sh --full
    - read/fetch-only 表面用 `codex_handoff_draft` 產生不改 DB 的 handoff packet。
    - full MCP 表面用 `codex_handoff_create` 建立精簡 handoff；public connector 僅允許 safe / dry-run lane，real `codex` lane 必須在 localhost 端取回 `collab_pack_get(plan_id)` 後由 Codex 確認。
    - `collab_pack_get(plan_id)` 是跨模型 continuity source of truth：後續 Pro / Codex / reviewer 都以它恢復共享狀態，而不是靠重貼完整聊天。
-4. **Deep Research import（人工訂閱研究 lane）**
-   - Codex 可產生 bounded research prompt，使用者在 ChatGPT Pro / Deep Research 手動執行，回傳 Markdown/PDF/source links。
-   - Codex 必須 cross-check 來源與 runtime truth；未驗證 claims 只能當假設，不得進 router、部署或交易 hot path。
+4. **Pro Research lane（人工訂閱研究 lane）**
+   - Codex / open-ultrawork 產生 `ProResearchJobV1` packet；`sync_responses_model=false`。
+   - 使用者在 ChatGPT Pro / Deep Research 手動執行，回傳 Markdown/PDF/source links。
+   - Codex 匯入後建立 source verification、claim ledger、next tests；未驗證 claims 只能當假設，不得進 router、部署或交易 hot path。
+   - 未來可做 browser 半自動，但 V4 預設不把 Deep Research 偽裝成同步 `/v1/responses` model。
 
 ### No-gap handoff contract
 
@@ -84,7 +104,9 @@ bash scripts/post-update-check.sh --full
 完成時必須同時滿足：
 
 - `model_gateway` 的 `/v1/models` 與 `codex debug models -c model_provider='"'"'"model_gateway"'"'"'` 同時列出 `gpt-5.5`、`chatgpt-pro-consult`、`opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6`、`fable-5`、`grok-build`、`minimax-m3`，且 Claude display name 不帶 `claude-` 前綴。
-- `/healthz` 標明 OpenAI/GPT 是 `passthrough`，Claude 是 `prompt_bridge_experimental`，不能把 Claude 說成官方等級 passthrough。
+- `/v1/models` 的每個 route capability 暴露 `author_model`、`decision_model`、`executor_host`、`authority_mode`、`patch_proposal`；外部模型 route 的 `decision_model` 不得被誤標為 GPT。
+- `/healthz` 標明 OpenAI/GPT 是 `passthrough`，Claude 是 `prompt_bridge_experimental`，不能把 Claude 說成官方等級 passthrough；`/healthz.capabilities` 與 `/healthz.routes` 也要暴露 authority metadata。
+- `chatgpt-pro-consult` 明確標示 `pro_research_equivalence=false`；`/healthz.pro_research_lane.kind` 是 `ProResearchJobV1` 且 `sync_responses_model=false`。
 - 五個 Claude slug 都至少跑一次 `/v1/responses` 極短 smoke test，看到 `response.completed`。Grok CLI 可用時，`grok-build` 也要跑一次同等 smoke。
 - Claude 文字回覆必須送出 assistant message 的 `response.output_item.done`，不能只有 `response.output_item.added` 或 `response.output_text.done`；否則 Codex App 可能完成 turn 但不落盤可見回覆。
 - app-server 層建立 thread 時 `modelProvider` 是 `model_gateway`；後續 `turn/start` 只改 `model`，能在同一 thread 內先跑 `chatgpt-pro-consult` / GPT 再跑 Claude，最後切回 `chatgpt-pro-consult`。
@@ -179,10 +201,10 @@ Gateway 依 `request.model` 分流：
 
 Claude/Grok/Minimax 等外部模型只能透過 request-scoped bridge 使用 Codex App 功能：
 
-- Codex App 在 Responses request 內提供的 `tools` schema 是唯一工具來源。
+- 當次 Responses request 內提供的 `tools` schema 是外部模型可見的工具來源；未在 schema 中出現就不可假裝可用。
 - Gateway 把當次 `tools` schema 轉成 prompt bridge 說明，外部模型只能回工具意圖 JSON。
 - Gateway 驗證工具名稱必須存在於當次 request；不存在就回明確錯誤，不臆造工具。
-- Gateway 把工具意圖轉成 Responses `function_call` event；Codex App 才是唯一工具執行者。
+- Gateway 把工具意圖轉成 Responses `function_call` event；當次授權的 `executor_host`（通常是 Codex App）才可執行工具並留下 trace。
 - 下一輪 request 的 `function_call_output`、`tool_search_call_output` 或同類結果再回灌給外部模型。
 - Computer use、plan mode、goal mode、MCP、future app tools 都走同一條規則：只有 Codex App 在 request schema 中暴露時才可用。
 
