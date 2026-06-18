@@ -87,11 +87,12 @@ bash scripts/post-update-check.sh --full
    - read/fetch-only 表面用 `codex_handoff_draft` 產生不改 DB 的 handoff packet。
    - full MCP 表面用 `codex_handoff_create` 建立精簡 handoff；public connector 僅允許 safe / dry-run lane，real `codex` lane 必須在 localhost 端取回 `collab_pack_get(plan_id)` 後由 Codex 確認。
    - `collab_pack_get(plan_id)` 是跨模型 continuity source of truth：後續 Pro / Codex / reviewer 都以它恢復共享狀態，而不是靠重貼完整聊天。
-4. **Pro Research lane（人工訂閱研究 lane）**
+4. **Pro Research MCP lane（訂閱 UI 研究 lane）**
    - Codex / open-ultrawork 產生 `ProResearchJobV1` packet；`sync_responses_model=false`。
-   - 使用者在 ChatGPT Pro / Deep Research 手動執行，回傳 Markdown/PDF/source links。
+   - 首選由 `chatgpt-pro-mcp` guarded async UI bridge 送入 ChatGPT Pro Web/App：`submit_deep_research` 可先回 `running`，`fetch_deep_research_result({ task_id, wait_seconds })` 後續 reattach 並匯回 Markdown/source links/claim ledger。
+   - `authority.author_model` 應標 `chatgpt-pro-web`（或更精確的已驗證模式），`executor_host=chatgpt-pro-mcp-web-adapter`，`authority_mode=research_ui_bridge`；若 `authority.research_mode.enabled=false`，只能稱 ChatGPT Pro Web research memo，不可宣稱 confirmed Deep Research。
    - Codex 匯入後建立 source verification、claim ledger、next tests；未驗證 claims 只能當假設，不得進 router、部署或交易 hot path。
-   - 未來可做 browser 半自動，但 V4 預設不把 Deep Research 偽裝成同步 `/v1/responses` model。
+   - 手動在 ChatGPT Pro / Deep Research 執行並貼回 Markdown/PDF/source links 只作 fallback；V4 不把 Deep Research 偽裝成同步 `/v1/responses` model，也不暴露 raw browser tools。
 
 ### No-gap handoff contract
 
@@ -106,7 +107,7 @@ bash scripts/post-update-check.sh --full
 - `model_gateway` 的 `/v1/models` 與 `codex debug models -c model_provider='"'"'"model_gateway"'"'"'` 同時列出 `gpt-5.5`、`opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6`、`fable-5`、`grok-build`、`minimax-m3`，且 Claude display name 不帶 `claude-` 前綴；`chatgpt-pro-consult` 不得出現在 catalog / dropdown。
 - `/v1/models` 的每個 route capability 暴露 `author_model`、`decision_model`、`executor_host`、`authority_mode`、`patch_proposal`；外部模型 route 的 `decision_model` 不得被誤標為 GPT。
 - `/healthz` 標明 OpenAI/GPT 是 `passthrough`，Claude 是 `prompt_bridge_experimental`，不能把 Claude 說成官方等級 passthrough；`/healthz.capabilities` 與 `/healthz.routes` 也要暴露 authority metadata。
-- `/healthz.routes.chatgpt-pro-consult` 若存在，必須標示 `listed_in_catalog=false`、`deprecated=true`、`replaced_by="gpt-5.5"`、`pro_research_equivalence=false`；`/healthz.pro_research_lane.kind` 是 `ProResearchJobV1` 且 `sync_responses_model=false`。
+- `/healthz.routes.chatgpt-pro-consult` 若存在，必須標示 `listed_in_catalog=false`、`deprecated=true`、`replaced_by="gpt-5.5"`、`pro_research_equivalence=false`；`/healthz.pro_research_lane.kind` 是 `ProResearchJobV1` 且 `sync_responses_model=false`，並標明首選 `chatgpt-pro-mcp` async UI bridge。
 - 五個 Claude slug 都至少跑一次 `/v1/responses` 極短 smoke test，看到 `response.completed`。Grok CLI 可用時，`grok-build` 也要跑一次同等 smoke。
 - Claude 文字回覆必須送出 assistant message 的 `response.output_item.done`，不能只有 `response.output_item.added` 或 `response.output_text.done`；否則 Codex App 可能完成 turn 但不落盤可見回覆。
 - app-server 層建立 thread 時 `modelProvider` 是 `model_gateway`；後續 `turn/start` 只改 `model`，能在同一 thread 內先跑 `gpt-5.5` / GPT 再跑 Claude，最後切回 `gpt-5.5`。
@@ -115,7 +116,7 @@ bash scripts/post-update-check.sh --full
 - Claude/Grok backend 的登入、OAuth、quota、session limit 這類使用者可處理狀態，不得用 streaming `response.failed` 回給 Codex App；要轉成可見的 completed assistant message，避免 App 誤判為 stream 斷線並重試。
 - 多模型協作不得默默走按量 API。Gateway 預設 `deny_metered_api_fanout`；只有 `local-openai-compatible`、`minimax-near-unlimited-api`、或 `user-approved-api:<provider>/<model>` 這類白名單模型/端點，且人類明確確認 provider、endpoint、計費型態、預算/停止條件後，才能啟用 API route。
 - request-scoped tool bridge 測試通過：Claude 只能輸出工具意圖，gateway 轉成 Responses `function_call`，Codex App 執行工具後的 `function_call_output` 能回灌下一輪 prompt。
-- ChatGPT Pro bridge 健康：Codex MCP Hub 的 connector-safe tool list 至少有 `collab_guide`、`codex_handoff_draft`、`codex_handoff_create`、`collab_pack_get`；public connector 不暴露 `run_command` / write / patch，也不能直接排 real `codex` lane；`collab_pack_get(plan_id)` 可恢復同一個 handoff 狀態。
+- ChatGPT Pro bridge 健康：Codex MCP Hub 的 connector-safe tool list 至少有 `collab_guide`、`codex_handoff_draft`、`codex_handoff_create`、`collab_pack_get`；`chatgpt-pro-mcp` tool list 至少有 `get_bridge_status`、`get_web_preflight`、`submit_deep_research`、`get_deep_research_status`、`fetch_deep_research_result`、`cancel_deep_research`；public connector / MCP 不暴露 `run_command` / write / patch / raw browser tools，也不能直接排 real `codex` lane；`collab_pack_get(plan_id)` 或 `ProResearchResultV1.content_hash` 可恢復同一個 handoff 狀態。
 - 使用者自己的 Codex config 已備份後設定 `model_provider = "model_gateway"`；如需遷移既有未封存 `openai` threads，必須一次性備份 SQLite 與 rollout metadata 後合併 provider，避免 sidebar 失去舊聊天。不做 watcher。
 - GitHub/交接版本不得包含 auth、token、state database、完整 logs、rollout 全文、私人 thread id、本機絕對路徑、私有截圖、renderer reverse-engineering 細節或可被當成攻擊 playbook 的內容。
 
@@ -349,6 +350,7 @@ app-server same-thread 驗收要檢查這三件事：
 - Codex App 工作中反覆斷線，App log 大量 `initialize handshake timed out` / `reconnect_failed` / `transport_closed`，且可見 `unsupported feature enablement auth_elicitation`：優先檢查外部 `codex app-server --listen unix://` 與 `codex app-server proxy` 是否由 PATH 上的舊 CLI 啟動，而非 App bundle 內建 binary。App 與 app-server 版本即使只差 prerelease suffix，也可能導致 remote-control handshake mismatch。修：不要 patch signed App；殺掉 stale app-server/proxy，讓 `codex app-server*` 一律走 `/Applications/Codex.app/Contents/Resources/codex`（可用 `$HOME/.local/bin/codex` wrapper 只攔 `app-server` 子命令，普通 CLI 仍走 Homebrew/系統 CLI），再重開 App 或讓 App 重啟 app-server。驗證：新 app-server/proxy command path 來自 Codex.app bundle，且新時間窗內 handshake/reconnect/transport counter 為 0。
 - GPT passthrough 時使用者取消 turn、App 重連或 client socket 提前關閉後，gateway launchd 反覆重啟，stderr 出現 `DOMException [AbortError]` / `ServerResponse.onClientGone`：這是 client cancellation 被當成未處理例外冒泡，不是上游 GPT 壞掉。修：runtime 的 `proxyChatgpt()` 必須追蹤 `clientGone` / `timedOut`，client gone 時 abort upstream 並吞掉 `AbortError`，只有 timeout 回乾淨 `504`；reader loop 與 top-level `handleResponses()` 也要 catch，避免整個 gateway 崩潰。補 regression test：GPT passthrough client disconnect aborts upstream without crashing gateway。
 - 多模型協作開始消耗 API 額度或看到未知 API key 被使用：立即停用該 API route / adapter / key path；只有 `local-openai-compatible`、`minimax-near-unlimited-api` 或人類針對本次任務明確批准的 `user-approved-api:<provider>/<model>` 可以恢復。恢復前必須記錄 provider、endpoint、計費/額度型態、預算上限與停止條件。
+- `chatgpt-pro-mcp` 回 `waiting_user` / `AUTH_REQUIRED` / `TERMS_REQUIRED` / `BILLING_OR_PLAN_REQUIRED`：這是正確 fail-closed。MCP 不代登入、不按付款/terms/settings/history、不輸出 browser profile/cookies；人類完成必要互動後再重跑 preflight 或 fetch。若 `authority.research_mode.enabled=false`，只能說 ChatGPT Pro Web research memo，不能說 confirmed Deep Research；若工作必須 confirmed Deep Research，設定 require-deep-research 後讓它 fail closed。
 - Claude turn 顯示完成但 App 沒有可見 assistant message：檢查 gateway SSE 是否對文字回覆送出 `response.output_item.done`，並跑 `Claude text responses emit completed assistant message items for Codex App persistence` 測試。
 - Claude 要求不存在的 tool：gateway 必須拒絕，不能交給 Claude 原生 runtime 嘗試執行。
 - UI dropdown 看不到模型但 CLI/gateway 正常：記為 Codex App UI/cache/upstream issue，不 patch signed app，不提交 reverse-engineering notes。
