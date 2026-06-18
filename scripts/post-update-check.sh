@@ -21,7 +21,7 @@ if [ -z "$GW_DIR" ]; then
     [ -f "$c/server.js" ] && { GW_DIR="$(cd "$c" && pwd)"; break; }
   done
 fi
-EXPECT_SLUGS=(gpt-5.5 opus-4-7 opus-4-8 sonnet-4-6 haiku-4-6 fable-5 grok-build minimax-m3)
+EXPECT_SLUGS=(gpt-5.5 chatgpt-pro-consult opus-4-7 opus-4-8 sonnet-4-6 haiku-4-6 fable-5 grok-build minimax-m3)
 
 full=0; [ "${1:-}" = "--full" ] && full=1
 fails=0
@@ -42,6 +42,24 @@ for H in "$HOME/.codex" "${CODEX_HOME:-}"; do
     warn "model_provider 不是 model_gateway  ($cfg)"
     note "還原：cp <backup>/config.toml \"$cfg\"（備份在 \$HOME/.codex/*.bak-* 或 backups/）；或重跑 install-codex-gateway.sh"
   fi
+  if rg -q '^[[:space:]]*model_reasoning_effort[[:space:]]*=[[:space:]]*"low"' "$cfg" 2>/dev/null; then
+    pass "model_reasoning_effort = low  ($cfg)"
+  else
+    warn "model_reasoning_effort 不是 low/fast  ($cfg)"
+    note "修復：設 model_reasoning_effort = \"low\"；深度推理改在單條 thread/plan mode 調高"
+  fi
+  if rg -q '^[[:space:]]*service_tier[[:space:]]*=[[:space:]]*"fast"' "$cfg" 2>/dev/null; then
+    pass "service_tier = fast  ($cfg)"
+  else
+    warn "service_tier 不是 fast  ($cfg)"
+    note "修復：設 service_tier = \"fast\"；切 gateway 後 UI fast 鍵不會由 catalog 補出"
+  fi
+  if rg -q '^[[:space:]]*model_auto_compact_token_limit_scope[[:space:]]*=[[:space:]]*"total"' "$cfg" 2>/dev/null; then
+    pass "auto-compact scope = total  ($cfg)"
+  else
+    warn "auto-compact scope 不是 total  ($cfg)"
+    note "修復：設 model_auto_compact_token_limit_scope = \"total\"，避免長 thread 撞窗前不壓縮"
+  fi
 done
 
 echo "[2] gateway healthz（launchd 進程，App 更新殺不掉它）"
@@ -61,23 +79,24 @@ echo "[3] model catalog"
 if curl -fsS --max-time 6 "$GATEWAY_URL/v1/models" >/tmp/puc_models.json 2>/dev/null; then
   miss=""; for s in "${EXPECT_SLUGS[@]}"; do jq -e --arg s "$s" '.models[]?|select(.slug==$s)' /tmp/puc_models.json >/dev/null 2>&1 || miss="$miss $s"; done
   [ -z "$miss" ] && pass "expected slugs 齊全" || warn "catalog 缺:$miss"
-  # All-models-default-fast: every model should advertise default_reasoning_level "low"
-  # so the picker starts each model on the fast tier (the gateway-side replacement for
-  # the native fast toggle, which is provider-gated and absent on a custom provider).
-  notlow="$(jq -r '.models[]?|select((.default_reasoning_level//"")!="low")|.slug' /tmp/puc_models.json 2>/dev/null | tr '\n' ' ')"
-  [ -z "$notlow" ] && pass "全模型預設 fast（default_reasoning_level=low）" \
-    || warn "未預設 fast 的模型:$notlow（設 GATEWAY_DEFAULT_REASONING_LEVEL 或檢查 buildModelEntry）"
+  if jq -e '.models[]?|select(.slug=="chatgpt-pro-consult" and .capabilities.role=="codex_native_consultant" and .capabilities.upstream_model=="gpt-5.5")' /tmp/puc_models.json >/dev/null 2>&1; then
+    pass "chatgpt-pro-consult 顧問 route 標記正確"
+  else
+    warn "chatgpt-pro-consult catalog metadata 異常"
+  fi
+  not_low="$(jq -r '.models[]? | select((.default_reasoning_level // "") != "low") | .slug' /tmp/puc_models.json 2>/dev/null | paste -sd ' ' -)"
+  [ -z "$not_low" ] && pass "all catalog default_reasoning_level = low" || warn "catalog 有非 low default_reasoning_level:$not_low"
 else warn "/v1/models 連不上"; fi
 
 echo "[4] codex debug models（config 端到端接通）"
 if command -v codex >/dev/null 2>&1; then
-  codex debug models -c model_provider='"model_gateway"' 2>/dev/null | jq -r '.models[]?.slug' | rg -q '^gpt-5\.5$' \
+  codex debug models -c model_provider='"model_gateway"' 2>/dev/null | jq -r '.models[]?.slug' | rg -q '^chatgpt-pro-consult$' \
     && pass "codex 看得到 gateway catalog" || { warn "codex 看不到 gateway catalog"; note "config parse error 或被更新重設；檢查 [model_providers.model_gateway]"; }
 else note "codex CLI 不在 PATH，略過"; fi
 
 echo "[5] GPT passthrough route（401 無授權 = 正確 fail-closed）"
 b=$(curl -sS --max-time 12 -N "$GATEWAY_URL/v1/responses" -H 'content-type: application/json' \
-  -d '{"model":"gpt-5.5","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"x"}]}],"stream":true}' 2>/dev/null)
+  -d '{"model":"chatgpt-pro-consult","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"x"}]}],"stream":true}' 2>/dev/null)
 if printf '%s' "$b" | rg -q 'requires Codex ChatGPT Authorization'; then pass "GPT route 活著且正確 fail-closed"
 elif printf '%s' "$b" | rg -q 'response.completed'; then pass "GPT route 回了完整回應"
 else warn "GPT route 回應異常"; note "'not implemented'→gateway 退版；404→config provider 沒接上"; fi

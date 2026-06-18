@@ -128,7 +128,7 @@ function parseSseEvents(text) {
     .map((line) => JSON.parse(line.slice("data: ".length)));
 }
 
-test("model catalog exposes GPT, Claude, Grok, and MiniMax slugs from the single gateway provider", async (t) => {
+test("model catalog exposes GPT, ChatGPT Pro consultant, Claude, Grok, and MiniMax slugs from the single gateway provider", async (t) => {
   const gateway = await startGateway();
   t.after(async () => gateway.close());
 
@@ -136,11 +136,25 @@ test("model catalog exposes GPT, Claude, Grok, and MiniMax slugs from the single
   const slugs = catalog.models.map((model) => model.slug);
 
   assert.deepEqual(
-    ["gpt-5.5", "opus-4-7", "opus-4-8", "sonnet-4-6", "haiku-4-6", "fable-5", "grok-build", "minimax-m3"].every((slug) =>
-      slugs.includes(slug),
-    ),
+    [
+      "gpt-5.5",
+      "chatgpt-pro-consult",
+      "opus-4-7",
+      "opus-4-8",
+      "sonnet-4-6",
+      "haiku-4-6",
+      "fable-5",
+      "grok-build",
+      "minimax-m3",
+    ].every((slug) => slugs.includes(slug)),
     true,
   );
+  const proConsult = catalog.models.find((model) => model.slug === "chatgpt-pro-consult");
+  assert.equal(proConsult.display_name, "ChatGPT Pro Consult");
+  assert.equal(proConsult.capabilities.backend, "chatgpt_subscription");
+  assert.equal(proConsult.capabilities.role, "codex_native_consultant");
+  assert.equal(proConsult.capabilities.upstream_model, "gpt-5.5");
+  assert.equal(proConsult.capabilities.isolation, "codex_first_party_same_thread");
   const fable = catalog.models.find((model) => model.slug === "fable-5");
   assert.equal(fable.display_name, "fable5");
   assert.equal(fable.context_window, 200000);
@@ -164,6 +178,9 @@ test("healthz exposes deny-by-default API spend policy", async (t) => {
     "minimax-near-unlimited-api",
   ]);
   assert.equal(health.capabilities.claude.backend, "claude_cli");
+  assert.equal(health.routes["chatgpt-pro-consult"].backend, "chatgpt_subscription");
+  assert.equal(health.routes["chatgpt-pro-consult"].role, "codex_native_consultant");
+  assert.equal(health.routes["chatgpt-pro-consult"].upstream_model, "gpt-5.5");
   assert.equal(health.capabilities.minimax.backend, "minimax_api");
   assert.equal(health.capabilities.minimax.spend_allowed, true);
 });
@@ -202,6 +219,62 @@ test("GPT models are proxied to the ChatGPT Codex subscription endpoint", async 
   assert.equal(upstream.seen[0].headers["chatgpt-account-id"], "account-123");
   assert.equal(upstream.seen[0].headers["session-id"], "session-123");
   assert.equal(upstream.seen[0].headers["thread-id"], "thread-123");
+  assert.equal(upstream.seen[0].body.model, "gpt-5.5");
+});
+
+test("ChatGPT Pro consultant route rewrites only the model slug before GPT subscription passthrough", async (t) => {
+  const upstream = await startMockChatgpt();
+  t.after(() => upstream.server.close());
+  const gateway = await startGateway({ CHATGPT_CODEX_BASE_URL: upstream.baseUrl });
+  t.after(async () => gateway.close());
+
+  const res = await fetch(`http://127.0.0.1:${gateway.port}/v1/responses`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: "Bearer test-token",
+      "chatgpt-account-id": "account-123",
+      "session-id": "session-123",
+      originator: "codex_cli",
+    },
+    body: JSON.stringify({
+      model: "chatgpt-pro-consult",
+      input: "act as a bounded consultant",
+      stream: true,
+      metadata: { consult_id: "consult_test" },
+    }),
+  });
+
+  const text = await res.text();
+  assert.equal(res.status, 200);
+  assert.match(text, /OK_GPT_PASSTHROUGH/);
+  assert.equal(upstream.seen.length, 1);
+  assert.equal(upstream.seen[0].body.model, "gpt-5.5");
+  assert.equal(upstream.seen[0].body.metadata.consult_id, "consult_test");
+  assert.equal(upstream.seen[0].headers.authorization, "Bearer test-token");
+});
+
+test("compact chatgpt-pro alias uses the same bounded consultant passthrough route", async (t) => {
+  const upstream = await startMockChatgpt();
+  t.after(() => upstream.server.close());
+  const gateway = await startGateway({ CHATGPT_CODEX_BASE_URL: upstream.baseUrl });
+  t.after(async () => gateway.close());
+
+  const res = await fetch(`http://127.0.0.1:${gateway.port}/v1/responses`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: "Bearer test-token",
+    },
+    body: JSON.stringify({
+      model: "chatgpt-pro",
+      input: "reply ok",
+      stream: true,
+    }),
+  });
+
+  await res.text();
+  assert.equal(res.status, 200);
   assert.equal(upstream.seen[0].body.model, "gpt-5.5");
 });
 
@@ -395,6 +468,34 @@ test("Claude subscription limits complete visibly instead of triggering Codex re
   assert.match(message.item.content[0].text, /session limit/);
   assert.ok(events.some((event) => event.type === "response.completed"));
   assert.equal(events.some((event) => event.type === "response.failed"), false);
+});
+
+test("Claude model-unavailable backend notices complete visibly instead of retrying", async (t) => {
+  const gateway = await startGateway({
+    CLAUDE_MOCK_ERROR_TEXT: "Claude Fable 5 is currently unavailable. Learn more: https://example.test/fable",
+  });
+  t.after(async () => gateway.close());
+
+  const res = await fetch(`http://127.0.0.1:${gateway.port}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "fable-5",
+      input: "reply visibly",
+      stream: true,
+    }),
+  });
+
+  const events = parseSseEvents(await res.text());
+  const message = events.find((event) => event.item?.type === "message");
+  const health = await requestJson(`http://127.0.0.1:${gateway.port}/healthz`);
+
+  assert.equal(res.status, 200);
+  assert.equal(message.type, "response.output_item.done");
+  assert.match(message.item.content[0].text, /currently unavailable/);
+  assert.ok(events.some((event) => event.type === "response.completed"));
+  assert.equal(events.some((event) => event.type === "response.failed"), false);
+  assert.equal(health.routes["fable-5"].error_kind, "model");
 });
 
 test("Claude prompt bridge includes tool results and namespace tools in request scope", async (t) => {

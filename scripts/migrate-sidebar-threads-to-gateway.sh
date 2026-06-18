@@ -49,28 +49,85 @@ sqlite3 "$DB" \
 
 BACKUP_CSV="$BACKUP_DIR/affected_threads.csv" TARGET_PROVIDER="$TARGET_PROVIDER" node <<'NODE'
 const fs = require("fs");
-const csv = fs.readFileSync(process.env.BACKUP_CSV, "utf8").trim();
-if (!csv) process.exit(0);
-for (const line of csv.split(/\n/)) {
-  const comma = line.indexOf(",");
-  if (comma < 0) continue;
-  const file = line.slice(comma + 1).replace(/\r$/, "");
-  if (!file || !fs.existsSync(file)) continue;
-  const raw = fs.readFileSync(file, "utf8");
-  const nl = raw.indexOf("\n");
-  const first = nl === -1 ? raw : raw.slice(0, nl);
-  const rest = nl === -1 ? "" : raw.slice(nl);
-  let obj;
+const { once } = require("events");
+
+function readFirstLine(file) {
+  const fd = fs.openSync(file, "r");
+  const chunks = [];
+  const buf = Buffer.allocUnsafe(64 * 1024);
+  let offset = 0;
   try {
-    obj = JSON.parse(first);
-  } catch {
-    continue;
-  }
-  if (obj.type === "session_meta" && obj.payload) {
-    obj.payload.model_provider = process.env.TARGET_PROVIDER;
-    fs.writeFileSync(file, JSON.stringify(obj) + rest);
+    while (true) {
+      const n = fs.readSync(fd, buf, 0, buf.length, offset);
+      if (n === 0) {
+        return { first: Buffer.concat(chunks).toString("utf8"), restStart: null };
+      }
+      const slice = buf.subarray(0, n);
+      const nl = slice.indexOf(10);
+      if (nl !== -1) {
+        chunks.push(Buffer.from(slice.subarray(0, nl)));
+        return { first: Buffer.concat(chunks).toString("utf8"), restStart: offset + nl + 1 };
+      }
+      chunks.push(Buffer.from(slice));
+      offset += n;
+      if (offset > 1024 * 1024) {
+        throw new Error(`first rollout line is too large: ${file}`);
+      }
+    }
+  } finally {
+    fs.closeSync(fd);
   }
 }
+
+async function replaceFirstLine(file, line, restStart) {
+  const stat = fs.statSync(file);
+  const tmp = `${file}.provider-merge-${process.pid}.tmp`;
+  const out = fs.createWriteStream(tmp, { mode: stat.mode });
+  try {
+    if (!out.write(line)) await once(out, "drain");
+    if (restStart !== null) {
+      if (!out.write("\n")) await once(out, "drain");
+      for await (const chunk of fs.createReadStream(file, { start: restStart })) {
+        if (!out.write(chunk)) await once(out, "drain");
+      }
+    }
+    await new Promise((resolve, reject) => {
+      out.end(resolve);
+      out.on("error", reject);
+    });
+    fs.renameSync(tmp, file);
+    fs.chmodSync(file, stat.mode);
+  } catch (error) {
+    out.destroy();
+    try { fs.unlinkSync(tmp); } catch {}
+    throw error;
+  }
+}
+
+const csv = fs.readFileSync(process.env.BACKUP_CSV, "utf8").trim();
+if (!csv) process.exit(0);
+(async () => {
+  for (const line of csv.split(/\n/)) {
+    const comma = line.indexOf(",");
+    if (comma < 0) continue;
+    const file = line.slice(comma + 1).replace(/\r$/, "");
+    if (!file || !fs.existsSync(file)) continue;
+    const { first, restStart } = readFirstLine(file);
+    let obj;
+    try {
+      obj = JSON.parse(first);
+    } catch {
+      continue;
+    }
+    if (obj.type === "session_meta" && obj.payload) {
+      obj.payload.model_provider = process.env.TARGET_PROVIDER;
+      await replaceFirstLine(file, JSON.stringify(obj), restStart);
+    }
+  }
+})().catch((error) => {
+  console.error(error.stack || String(error));
+  process.exit(1);
+});
 NODE
 
 echo "migrated=$count"

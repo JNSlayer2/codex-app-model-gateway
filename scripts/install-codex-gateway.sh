@@ -220,8 +220,8 @@ c_ok "gateway 已載入 launchd"
 ok=1
 curl --retry 15 --retry-delay 1 --retry-connrefused -fsS --max-time 8 "$URL/healthz" >/tmp/install-health.json 2>/dev/null \
   && [ "$(jq -r .ok /tmp/install-health.json 2>/dev/null)" = "true" ] && c_ok "healthz ok" || { c_no "healthz 失敗"; ok=0; }
-curl -fsS --max-time 6 "$URL/v1/models" 2>/dev/null | jq -e '.models[]?|select(.slug=="gpt-5.5")' >/dev/null 2>&1 \
-  && c_ok "catalog 列出 gpt-5.5" || { c_no "catalog 異常"; ok=0; }
+curl -fsS --max-time 6 "$URL/v1/models" 2>/dev/null | jq -e 'any(.models[]?; .slug=="gpt-5.5") and any(.models[]?; .slug=="chatgpt-pro-consult")' >/dev/null 2>&1 \
+  && c_ok "catalog 列出 gpt-5.5 + chatgpt-pro-consult" || { c_no "catalog 異常"; ok=0; }
 if [ -n "$CODEX_BIN" ]; then
   "$CODEX_BIN" debug models -c model_provider='"model_gateway"' 2>/dev/null | jq -r '.models[]?.slug' | grep -q '^gpt-5\.5$' \
     && c_ok "codex 看得到 gateway catalog" || c_warn "codex debug models 看不到 → 檢查 config parse"

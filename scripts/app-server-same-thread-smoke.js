@@ -2,17 +2,21 @@
 "use strict";
 
 const { spawn } = require("node:child_process");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 
 const timeoutMs = Number(process.env.APP_SERVER_SAME_THREAD_TIMEOUT_MS || 600000);
 const code = `CODEX_GATEWAY_CONTEXT_${Date.now()}`;
-const claudeThreadModels = (process.env.SAME_THREAD_CLAUDE_MODELS || "opus-4-7,opus-4-8,sonnet-4-6,haiku-4-6,fable-5")
+const gptModel = process.env.SAME_THREAD_GPT_MODEL || "chatgpt-pro-consult";
+const claudeThreadModels = (process.env.SAME_THREAD_CLAUDE_MODELS || "opus-4-7,opus-4-8,sonnet-4-6,haiku-4-6")
   .split(",")
   .map((model) => model.trim())
   .filter(Boolean);
 const turns = [
   {
     label: "gpt-store-context",
-    model: "gpt-5.5",
+    model: gptModel,
     text: `The verification code for this thread is ${code}. It is the only string that starts with CODEX_GATEWAY_CONTEXT_. Remember that exact code for later turns. Reply only OK_GPT_CONTEXT_STORED.`,
     expect: "OK_GPT_CONTEXT_STORED",
   },
@@ -24,7 +28,7 @@ const turns = [
   })),
   {
     label: "gpt-switch-back",
-    model: "gpt-5.5",
+    model: gptModel,
     text: "Reply only OK_GPT_SWITCH_BACK.",
     expect: "OK_GPT_SWITCH_BACK",
   },
@@ -38,9 +42,50 @@ const state = {
   error: null,
 };
 
+function prepareCodexHome() {
+  if (process.env.SAME_THREAD_USE_CURRENT_CODEX_HOME === "1" || process.env.SAME_THREAD_ISOLATED_HOME === "0") {
+    return { env: process.env, cleanup: () => {} };
+  }
+  const sourceHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-same-thread-"));
+  const sourceAuth = path.join(sourceHome, "auth.json");
+  const tempAuth = path.join(tempHome, "auth.json");
+  if (fs.existsSync(sourceAuth)) {
+    fs.symlinkSync(sourceAuth, tempAuth);
+  }
+  fs.writeFileSync(
+    path.join(tempHome, "config.toml"),
+    [
+      `model = "${gptModel}"`,
+      `model_provider = "model_gateway"`,
+      `model_reasoning_effort = "low"`,
+      `service_tier = "fast"`,
+      `model_auto_compact_token_limit = 200000`,
+      `model_auto_compact_token_limit_scope = "total"`,
+      ``,
+      `[model_providers.model_gateway]`,
+      `name = "Model Gateway"`,
+      `base_url = "${process.env.MODEL_GATEWAY_BASE_URL || "http://127.0.0.1:4177/v1"}"`,
+      `wire_api = "responses"`,
+      `requires_openai_auth = true`,
+      ``,
+    ].join("\n"),
+  );
+  return {
+    env: { ...process.env, CODEX_HOME: tempHome },
+    cleanup: () => {
+      if (process.env.SAME_THREAD_KEEP_HOME !== "1") {
+        fs.rmSync(tempHome, { recursive: true, force: true });
+      }
+    },
+  };
+}
+
+const codexHome = prepareCodexHome();
+
 const child = spawn("codex", ["app-server", "--analytics-default-enabled"], {
   cwd: process.cwd(),
-  env: process.env,
+  env: codexHome.env,
   stdio: ["pipe", "pipe", "pipe"],
 });
 
@@ -98,6 +143,7 @@ function startNextTurn() {
 function done() {
   clearTimeout(timer);
   child.kill("SIGTERM");
+  codexHome.cleanup();
   console.log(JSON.stringify({ ok: true, threadId: state.threadId, threadProvider: state.threadProvider, results: state.results }, null, 2));
 }
 
@@ -105,6 +151,7 @@ function fail(error) {
   clearTimeout(timer);
   state.error = error;
   child.kill("SIGTERM");
+  codexHome.cleanup();
   console.error(JSON.stringify({ ok: false, error, ...snapshotState() }, null, 2));
   process.exitCode = 1;
 }
@@ -166,7 +213,7 @@ function handleMessage(msg) {
     send(
       "thread/start",
       {
-        model: "gpt-5.5",
+        model: gptModel,
         modelProvider: "model_gateway",
         cwd: null,
         runtimeWorkspaceRoots: null,

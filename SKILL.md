@@ -7,9 +7,9 @@ metadata:
 
 # Codex App Model Gateway v4
 
-> **免責聲明 / Disclaimer**：本工具讓你在自己付費的 Codex App 內把模型切到 Claude / Grok，並讓 GPT 透過你**自己的** ChatGPT 訂閱 session 繼續運作。它只代理「你自己已登入」的 session，不分發、不竊取任何憑證。但「以本機 proxy 轉發 ChatGPT 訂閱 session」可能牴觸 OpenAI ChatGPT 訂閱條款（訂閱條款對自動化／代理／非官方介面通常比 API 條款更嚴）；Claude CLI / Grok CLI 的包裝亦各受其供應商條款約束。**是否使用、是否合規由你自負**，請先自行確認 OpenAI / Anthropic / xAI 當前條款。本 repo private-first，公開散布前自行評估帳號風險。工具按「現狀（as-is）」提供，無任何擔保。
+> **免責聲明 / Disclaimer**：本工具讓你在自己付費的 Codex App 內把模型切到 Claude / Grok，並讓 GPT 透過你**自己的** ChatGPT 訂閱 session 繼續運作。它只代理「你自己已登入」的 session，不分發、不竊取任何憑證。但「以本機 proxy 轉發 ChatGPT 訂閱 session」可能牴觸 OpenAI ChatGPT 訂閱條款（訂閱條款對自動化／代理／非官方介面通常比 API 條款更嚴）；Claude CLI / Grok CLI 的包裝亦各受其供應商條款約束。**是否使用、是否合規由你自負**，請先自行確認 OpenAI / Anthropic / xAI 當前條款。本 repo 是 public-safe reference；實際帳號、憑證、tunnel 與本機 state 必須留在使用者自己的機器。工具按「現狀（as-is）」提供，無任何擔保。
 
-目標是讓 Codex App 只使用一個穩定 provider：`model_gateway`。同一條 thread 內只切換 `model`，不切換 provider。GPT 走 Codex ChatGPT subscription passthrough；Claude `opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6`、`fable-5` 走 Claude CLI adapter，display name 用 `opus4.7`、`opus4.8`、`sonnet4.6`、`haiku4.6`、`fable5`；所有工具能力都由 Codex App request-scoped tool bridge 掌握。
+目標是讓 Codex App 只使用一個穩定 provider：`model_gateway`。同一條 thread 內只切換 `model`，不切換 provider。GPT 走 Codex ChatGPT subscription passthrough；`chatgpt-pro-consult` 是 Codex-native ChatGPT Pro 顧問 route（只把上游 model 改寫成 `gpt-5.5`，保留同 thread / headers / tools）；Claude `opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6`、`fable-5` 走 Claude CLI adapter，display name 用 `opus4.7`、`opus4.8`、`sonnet4.6`、`haiku4.6`、`fable5`；所有工具能力都由 Codex App request-scoped tool bridge 掌握。
 
 **穩定交付的 UI 定義**：不只 gateway health、catalog 與 live smoke 要綠，Codex App 左側專案列表也不能因 provider split 顯示「沒有聊天」。若全域 `model_provider` 已切到 `model_gateway`，未封存 `openai` threads 必須經一次性備份後合併到 `model_gateway`，否則 App 可能只顯示 gateway threads，讓舊專案看似消失。
 
@@ -48,24 +48,52 @@ bash scripts/post-update-check.sh --full
 
 - Public catalog slug: `fable-5`; display name: `fable5`; Claude CLI candidate order: `claude-fable-5`, `fable-5`, `fable`.
 - Treat `fable-5` as a premium Claude-family route, not a new Codex provider. It must use the same request-scoped tool bridge and the same fail-closed backend-notice behavior as Opus/Sonnet/Haiku.
-- Default advertised context is `200000` unless the runtime has verified a larger Fable variant; do not over-advertise context based on branding or hearsay.
+- Default advertised context is `200000` unless the runtime has verified a larger Fable variant; do not over-advertise context from branding or hearsay.
 - `fable5` is a compatibility alias only. The catalog slug remains `fable-5` so threads switch model within the single `model_gateway` provider.
+
+## v4：ChatGPT Pro / Codex MCP RPO bridge
+
+`RPO` 在本 skill 中指 **Research / Plan / Operate**。v4 要同時支援兩條互補路線，避免 ChatGPT Pro、Codex App 與外部 reviewer 之間出現資訊斷層：
+
+1. **Codex-native ChatGPT Pro consultant route（Codex → ChatGPT Pro subscription，日常主線）**
+   - Catalog slug：`chatgpt-pro-consult`；display name：`ChatGPT Pro Consult`；compat alias：`chatgpt-pro`。
+   - 這不是新 provider、不是 ChatGPT Web 自動化，也不是 API key route；gateway 只把 request body 的 `model` 改成上游 `gpt-5.5`，其餘 Codex session headers、thread/tool context、MCP tool results 原封 passthrough。
+   - 用途是 Codex 主控下的 bounded consultant / critique / plan / risk lane；Codex 仍是唯一 side-effect executor。
+2. **Codex-native GPT route（Codex → ChatGPT Pro subscription）**
+   - `gpt-*` / official OpenAI-family text slugs 仍走 Codex App 的 ChatGPT subscription passthrough。
+   - `requires_openai_auth = true` 必須保留，讓 Codex App 自己帶 session；這不是 OpenAI API key，也不是把 ChatGPT token 交給外部模型。
+   - 同一條 Codex thread 只切 `model`，不切 provider；這是工具狀態、MCP tool results、plan/goal mode 與 auto-compaction 不斷層的主路線。
+3. **ChatGPT Pro frontdoor（ChatGPT Pro → Codex MCP Hub）**
+   - ChatGPT Pro connector 先讀 `collab_guide`。
+   - read/fetch-only 表面用 `codex_handoff_draft` 產生不改 DB 的 handoff packet。
+   - full MCP 表面用 `codex_handoff_create` 建立精簡 handoff；public connector 僅允許 safe / dry-run lane，real `codex` lane 必須在 localhost 端取回 `collab_pack_get(plan_id)` 後由 Codex 確認。
+   - `collab_pack_get(plan_id)` 是跨模型 continuity source of truth：後續 Pro / Codex / reviewer 都以它恢復共享狀態，而不是靠重貼完整聊天。
+4. **Deep Research import（人工訂閱研究 lane）**
+   - Codex 可產生 bounded research prompt，使用者在 ChatGPT Pro / Deep Research 手動執行，回傳 Markdown/PDF/source links。
+   - Codex 必須 cross-check 來源與 runtime truth；未驗證 claims 只能當假設，不得進 router、部署或交易 hot path。
+
+### No-gap handoff contract
+
+每個 Pro/Codex bridge packet 必須包含：`plan_id`、objective、constraints、repo/path refs、source links、decisions、open questions、next Codex action、Done condition、verification commands、artifact refs、content hash。任何模型若沒有 tool trace / `function_call_output` / test output，就只能提出 intent 或 critique，不能宣稱 side effect 已完成。
+
+安全邊界：public MCP 不暴露 `run_command`、write/patch、approval resolve、worker claim/result、artifact/decision 直寫或 real `codex` execution；不記錄 secrets、tokens、auth state、SQLite、完整 logs、private thread ids、私有 tunnel URL 或本機絕對路徑。
 
 ## 完成定義
 
 完成時必須同時滿足：
 
-- `model_gateway` 的 `/v1/models` 與 `codex debug models -c model_provider='"model_gateway"'` 同時列出 `gpt-5.5`、`opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6`、`fable-5`、`grok-build`，且 Claude display name 不帶 `claude-` 前綴。
+- `model_gateway` 的 `/v1/models` 與 `codex debug models -c model_provider='"'"'"model_gateway"'"'"'` 同時列出 `gpt-5.5`、`chatgpt-pro-consult`、`opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6`、`fable-5`、`grok-build`、`minimax-m3`，且 Claude display name 不帶 `claude-` 前綴。
 - `/healthz` 標明 OpenAI/GPT 是 `passthrough`，Claude 是 `prompt_bridge_experimental`，不能把 Claude 說成官方等級 passthrough。
 - 五個 Claude slug 都至少跑一次 `/v1/responses` 極短 smoke test，看到 `response.completed`。Grok CLI 可用時，`grok-build` 也要跑一次同等 smoke。
 - Claude 文字回覆必須送出 assistant message 的 `response.output_item.done`，不能只有 `response.output_item.added` 或 `response.output_text.done`；否則 Codex App 可能完成 turn 但不落盤可見回覆。
-- app-server 層建立 thread 時 `modelProvider` 是 `model_gateway`；後續 `turn/start` 只改 `model`，能在同一 thread 內先跑 GPT 再跑 Claude。
+- app-server 層建立 thread 時 `modelProvider` 是 `model_gateway`；後續 `turn/start` 只改 `model`，能在同一 thread 內先跑 `chatgpt-pro-consult` / GPT 再跑 Claude，最後切回 `chatgpt-pro-consult`。
 - Codex App 左側專案列表不因 provider split 遺失既有未封存 threads；`post-update-check.sh` 的 sidebar provider coherence 必須通過。
 - Gateway 對大型 context request 不得 reset socket 造成 Codex App `stream disconnected before completion` retry storm；超過上限時要回乾淨的 `413`。預設 body 上限是 `64MB`，可用 `GATEWAY_MAX_BODY_BYTES` 覆寫。
 - Claude/Grok backend 的登入、OAuth、quota、session limit 這類使用者可處理狀態，不得用 streaming `response.failed` 回給 Codex App；要轉成可見的 completed assistant message，避免 App 誤判為 stream 斷線並重試。
 - 多模型協作不得默默走按量 API。Gateway 預設 `deny_metered_api_fanout`；只有 `local-openai-compatible`、`minimax-near-unlimited-api`、或 `user-approved-api:<provider>/<model>` 這類白名單模型/端點，且人類明確確認 provider、endpoint、計費型態、預算/停止條件後，才能啟用 API route。
 - request-scoped tool bridge 測試通過：Claude 只能輸出工具意圖，gateway 轉成 Responses `function_call`，Codex App 執行工具後的 `function_call_output` 能回灌下一輪 prompt。
-- 本機 default config 已備份後設定 `model_provider = "model_gateway"`；同時一次性備份並合併未封存 `openai` threads 的 SQLite `threads.model_provider` 與 rollout 首行 `session_meta.payload.model_provider`，避免 sidebar 失去舊聊天。不做 watcher。
+- ChatGPT Pro bridge 健康：Codex MCP Hub 的 connector-safe tool list 至少有 `collab_guide`、`codex_handoff_draft`、`codex_handoff_create`、`collab_pack_get`；public connector 不暴露 `run_command` / write / patch，也不能直接排 real `codex` lane；`collab_pack_get(plan_id)` 可恢復同一個 handoff 狀態。
+- 使用者自己的 Codex config 已備份後設定 `model_provider = "model_gateway"`；如需遷移既有未封存 `openai` threads，必須一次性備份 SQLite 與 rollout metadata 後合併 provider，避免 sidebar 失去舊聊天。不做 watcher。
 - GitHub/交接版本不得包含 auth、token、state database、完整 logs、rollout 全文、私人 thread id、本機絕對路徑、私有截圖、renderer reverse-engineering 細節或可被當成攻擊 playbook 的內容。
 
 ## 不可破壞邊界
@@ -129,6 +157,7 @@ requires_openai_auth = true
 
 Gateway 依 `request.model` 分流：
 
+- `chatgpt-pro-consult` / `chatgpt-pro`：Codex-native 顧問 route；gateway 只把上游 model 改寫成 `gpt-5.5`，保留官方 Codex tools、MCP、computer use、plan/goal mode 與同 thread continuity。
 - `gpt-*` 與 `codex-auto-review`：原封不動 proxy 到 Codex ChatGPT subscription Responses endpoint，保留官方 Codex tools、MCP、computer use、plan/goal mode 與未來 Codex App 功能。
 - `opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6`、`fable-5`：呼叫 Claude CLI，使用 `--no-session-persistence`、空 MCP config、停用 slash commands、禁止 Claude 原生工具執行。`opus4.7`、`opus4.8`、`sonnet4.6`、`haiku4.6`、`fable5` 可作為相容 alias，但 catalog slug 保留 Codex 已驗證可解析的 hyphen form。
 - Grok `grok-build`：呼叫 Grok CLI，保留 Grok CLI 自己的模型命名，gateway request 內停用 plan/memory/web search/native tools；Codex tools 仍只走 request-scoped prompt bridge。
@@ -245,18 +274,18 @@ Claude quota 尚未 reset 時，只驗證非 Claude live 項目：
 MODEL_GATEWAY_DIR=<gateway-dir> RUN_CLAUDE_SMOKE=0 bash scripts/live-verify-codex-gateway.sh
 ```
 
-`scripts/live-verify-codex-gateway.sh` 會呼叫 `scripts/app-server-same-thread-smoke.js` 驗證同一條 app-server thread 可依序跑 `gpt-5.5 -> opus-4-7 -> opus-4-8 -> sonnet-4-6 -> haiku-4-6 -> fable-5 -> gpt-5.5`，且五個 Claude slug 都能讀到 GPT 前一輪放入的驗收碼。
+`scripts/live-verify-codex-gateway.sh` 會呼叫 `scripts/app-server-same-thread-smoke.js` 驗證同一條 app-server thread 可依序跑 `chatgpt-pro-consult -> opus-4-7 -> opus-4-8 -> sonnet-4-6 -> haiku-4-6 -> chatgpt-pro-consult`，且核心 Claude slug 都能讀到 ChatGPT Pro Consult 前一輪放入的驗收碼。`fable-5` 另由 live smoke 驗證；若上游回「目前不可用」，gateway 必須用可見 completed notice 表達，不能用 `response.failed` 造成 retry loop。可用 `SAME_THREAD_CLAUDE_MODELS=opus-4-7,opus-4-8,sonnet-4-6,haiku-4-6,fable-5` 在 Fable 可用時把它納入 same-thread 驗收。
 完整驗收不得設定 `RUN_CLAUDE_SMOKE=0` 或 `RUN_SAME_THREAD_SMOKE=0`；跳過模式只用於 quota reset 前確認非 Claude 路徑沒有退化。
 
 Catalog：
 
 ```bash
 curl -fsS http://127.0.0.1:4177/v1/models \
-  | jq -r '.models[]? | select(.slug|test("^(gpt-5.5|opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6|fable-5|grok-build)$")) | [.slug,.display_name,.capabilities.backend,.capabilities.codex_tools] | @tsv'
+  | jq -r '.models[]? | select(.slug|test("^(gpt-5.5|chatgpt-pro-consult|opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6|fable-5|grok-build|minimax-m3)$")) | [.slug,.display_name,.capabilities.backend,.capabilities.codex_tools] | @tsv'
 
 codex debug models -c model_provider='"model_gateway"' \
   | jq -r '.models[]?.slug' \
-  | rg '^(gpt-5\.5|opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6|fable-5)$'
+  | rg '^(gpt-5\.5|chatgpt-pro-consult|opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6|fable-5|grok-build|minimax-m3)$'
 ```
 
 Claude slug smoke：
@@ -282,8 +311,8 @@ npm test -- --test-name-pattern 'Claude text responses'
 app-server same-thread 驗收要檢查這三件事：
 
 - `thread/start` response 的 `modelProvider` 是 `model_gateway`。
-- 第一個 `turn/start` 用 `model: "gpt-5.5"` 成功。
-- 同一個 `threadId` 後續 `turn/start` 分別用 `opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6`、`fable-5` 成功讀到前文，最後再切回 `gpt-5.5` 成功。
+- 第一個 `turn/start` 用 `model: "chatgpt-pro-consult"` 成功。
+- 同一個 `threadId` 後續 `turn/start` 分別用 `opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6` 成功讀到前文，最後再切回 `chatgpt-pro-consult` 成功。
 
 ## 失敗處理
 
@@ -292,8 +321,10 @@ app-server same-thread 驗收要檢查這三件事：
 - Claude 只回文字不能用工具：看 `/healthz` 的 Claude `codex_tools` 是否仍是 `not_implemented`，或 request 是否真的帶 `tools` schema。
 - Codex App 對 `127.0.0.1:4177/v1/responses` 顯示 `stream disconnected before completion` 並反覆 `Reconnecting... 1/5→5/5`：先看 gateway 是否仍在舊 2MB body cap。修：更新 runtime 到含 `GATEWAY_MAX_BODY_BYTES` 的版本，預設 64MB；超限要回 `413 request body too large`，不可 `req.destroy()` reset socket。重啟：`launchctl kickstart -k gui/$(id -u)/com.$(id -un).codex-model-gateway`。
 - Claude/Grok session limit 或未登入時出現同樣 reconnect loop：gateway 把 backend limit/auth 當 `response.failed` 送出，Codex App 會 retry。修：更新 runtime 到「backend notice completes visibly」版本；此時 UI 應收到一則 assistant 訊息說明 limit/auth，而不是 `response.failed`。
-- 重 turn（ultrawork + 1M-context Claude）跑幾分鐘後 `stream disconnected` / `Reconnecting`，但 body 沒超 cap、gateway 也沒崩：成因是 buffered backend（`sse_after_backend_completion`）在 `await runClaude` 期間零 byte 送出，Codex App idle timeout 先斷線；且 `CLAUDE_TIMEOUT_MS` 預設 2 分鐘會把長 turn SIGKILL。修：runtime 在 stream await 期間每 `GATEWAY_HEARTBEAT_MS`（預設 15s）送 SSE 註解 keepalive 保活（`finally` 清 interval）；plist 把 `CLAUDE_TIMEOUT_MS` 拉到 600000、`GROK_TIMEOUT_MS` 300000。安裝器已內建這些預設並可用同名 env 覆寫。
+- 重 turn（ultrawork + 1M-context Claude）跑幾分鐘後 `stream disconnected` / `Reconnecting`，但 body 沒超 cap、gateway 也沒崩：成因是 buffered backend（`sse_after_backend_completion`）在 `await runClaude` 期間沒有 data-bearing Responses 事件，Codex App idle timeout 先斷線；且 `CLAUDE_TIMEOUT_MS` 預設 2 分鐘會把長 turn SIGKILL。修：runtime 在 stream 開始立即送 `response.created`，等待期間每 `GATEWAY_HEARTBEAT_MS`（預設 15s）送語義型 `response.in_progress` SSE（不要只送註解 keepalive，部分 App/reconnect path 不算活動），完成時用同一 response id 送 `response.output_item.done` + `response.completed`；plist 把 `CLAUDE_TIMEOUT_MS` 拉到 600000、`GROK_TIMEOUT_MS` 300000。安裝器已內建這些預設並可用同名 env 覆寫。
 - 重度 thread 撞 `ran out of room in the model's context window`：catalog 把 Claude context_window 報成 200K 而 Codex App 依此擋。修：對 1M-capable slug（如 opus-4-8）在 `claudeRoutes` 加 `context_window: 1000000` 並把 `[1m]` 變體放 candidates 第一個（advertise 與後端必須一致）；既有 thread 已固化上限，要開新 thread 才生效。
+- Codex App 工作中反覆斷線，App log 大量 `initialize handshake timed out` / `reconnect_failed` / `transport_closed`，且可見 `unsupported feature enablement auth_elicitation`：優先檢查外部 `codex app-server --listen unix://` 與 `codex app-server proxy` 是否由 PATH 上的舊 CLI 啟動，而非 App bundle 內建 binary。App 與 app-server 版本即使只差 prerelease suffix，也可能導致 remote-control handshake mismatch。修：不要 patch signed App；殺掉 stale app-server/proxy，讓 `codex app-server*` 一律走 `/Applications/Codex.app/Contents/Resources/codex`（可用 `$HOME/.local/bin/codex` wrapper 只攔 `app-server` 子命令，普通 CLI 仍走 Homebrew/系統 CLI），再重開 App 或讓 App 重啟 app-server。驗證：新 app-server/proxy command path 來自 Codex.app bundle，且新時間窗內 handshake/reconnect/transport counter 為 0。
+- GPT passthrough 時使用者取消 turn、App 重連或 client socket 提前關閉後，gateway launchd 反覆重啟，stderr 出現 `DOMException [AbortError]` / `ServerResponse.onClientGone`：這是 client cancellation 被當成未處理例外冒泡，不是上游 GPT 壞掉。修：runtime 的 `proxyChatgpt()` 必須追蹤 `clientGone` / `timedOut`，client gone 時 abort upstream 並吞掉 `AbortError`，只有 timeout 回乾淨 `504`；reader loop 與 top-level `handleResponses()` 也要 catch，避免整個 gateway 崩潰。補 regression test：GPT passthrough client disconnect aborts upstream without crashing gateway。
 - 多模型協作開始消耗 API 額度或看到未知 API key 被使用：立即停用該 API route / adapter / key path；只有 `local-openai-compatible`、`minimax-near-unlimited-api` 或人類針對本次任務明確批准的 `user-approved-api:<provider>/<model>` 可以恢復。恢復前必須記錄 provider、endpoint、計費/額度型態、預算上限與停止條件。
 - Claude turn 顯示完成但 App 沒有可見 assistant message：檢查 gateway SSE 是否對文字回覆送出 `response.output_item.done`，並跑 `Claude text responses emit completed assistant message items for Codex App persistence` 測試。
 - Claude 要求不存在的 tool：gateway 必須拒絕，不能交給 Claude 原生 runtime 嘗試執行。
@@ -310,6 +341,9 @@ app-server same-thread 驗收要檢查這三件事：
 - 子程序輸出撐爆記憶體（OOM 拖垮所有路由含 GPT passthrough）：claude/grok stdout 無上限。修：server.js 加 `MAX_CHILD_STDOUT` 上限。
 - 未來非 `gpt-` 前綴的 OpenAI 模型（如 `o4-mini`）出現後在 dropdown 選了卻 404：`isOfficialOpenAiSlug` 只認 `^gpt-`。修：放寬為 `^(gpt-|o[1-9]\d?(-|$)|chatgpt-|codex(-|$))`，未知 OpenAI slug 走 passthrough 由上游回真錯。
 - 切換在某台機器完全沒接上（codex debug models 看不到 gateway）：config 沒設 provider 或 node 路徑錯。修：重跑 `install-codex-gateway.sh`（會寫 provider 區塊並用偵測到的 node 絕對路徑）。
+- Codex App / CLI 對 Pro 帳號狂跳 `usage limit reached` / `Upgrade to Plus` / `try again <一個月後>`，但帳號選單顯示 Pro、剩餘用量還很多：**先別當成真的撞限額或帳號沒付費**。直接打後端會看到 `plan_type: free`，但本機 token claim 是 `pro` ── 這是 **OAuth refresh-token 輪換競爭**造成的壞 session：refresh token 是一次性，gateway + 多個 `codex app-server` + CLI 同時讀同一份 `auth.json` 各自刷新，一個刷新就作廢其餘，連鎖出 `refresh_token_reused` / `token_invalidated` / `refresh token was revoked`，後端對壞 session 退化成 free 限額。修：**先靜默所有 auth.json 消費者**（quit App → `pkill codex app-server` → `launchctl bootout` gateway），再乾淨 `codex logout && codex login`，最後**逐一**把 gateway → App 開回來，避免重登後又被搶刷。驗證：乾淨重登後 `codex exec -m gpt-5.5` 跑通即代表帳號本身正常、先前 free 是壞 token 假象。**診斷時不要手刻 request 連打 `chatgpt.com/backend-api/codex`**（固定 session_id 的重放會觸發濫用偵測、加重 session 失效）；用正規 client（CLI / App）測。
+- 多模下拉只剩 GPT 系、claude/grok/minimax 不見，但 gateway `/v1/models` 回傳完整：**stale `models_cache.json`**。成因：在 gateway 重啟/抓取窗口內 Codex 去 refresh catalog，只有 GPT passthrough 那條即時可回，Codex 把「只剩原生認得的 OpenAI slug」的 fallback 清單寫進 cache。修：備份後刪 `models_cache.json`，跑 `codex debug models`（或重開 App）強制重抓完整 catalog。與 sidebar provider-split（thread 被藏）是**不同**問題，後者用 `migrate-sidebar-threads-to-gateway.sh`。
+- 影像生成（`gpt-image-2` 等）反覆回 `The model '...' does not exist`：`isOfficialOpenAiSlug` 把 `gpt-image-*` 當官方 slug → 走 `proxyChatgpt` 轉發到 `/backend-api/codex/responses`，但該 endpoint 不服務影像模型 → 上游回不存在；gateway 也沒有 `/v1/images` 路由。**已知限制：訂閱 `/responses` passthrough 不支援影像生成**（文字模型 gpt/claude/minimax 正常）。常為**暫態**：底層壞 turn（token/cache 問題）修好後該 thread 重跑就不再觸發。要根治只有兩條，且都需取捨：(a) gateway 對 image slug 回一則乾淨可見的「不支援影像」completed message（不再洗 8 次 raw error，不花錢、不逆向）；(b) 人類明確授權後走 `user-approved-api:openai/gpt-image-*` 的按量 images API（花錢、與訂閱分開）。**不得逆向 OpenAI 影像後端路徑**。
 
 ## GitHub / Handoff Hygiene
 
@@ -348,7 +382,9 @@ app-server same-thread 驗收要檢查這三件事：
 - 2026-06-01：Claude session limit 也會因 `response.failed` 被 Codex App 當斷線重試。對策：backend quota/auth/login 類錯誤改成 completed assistant message，保留可見錯誤但停止 retry storm。
 - 2026-06-01：多模型協作必須防止未授權 API fan-out 燒額度。對策：skill 與 `/healthz` 加入 deny-by-default API spend policy；白名單只允許本地無上限、Minimax 近吃到飽或人類逐案批准的 API。
 - 2026-06-01：把 Codex App 環境調到能穩定承載「gateway + ultrawork-claude」重載。三個真兇都不是 gateway 崩潰：(1) launchd job 沒 bootstrap → 4177 無 listener；(2) Claude catalog 報 200K context，重 thread 被擋 → opus-4-8 改走 `[1m]` 變體並 advertise 1M；(3) buffered SSE 在長 turn 期間零 byte + 2 分鐘 timeout → 加 15s SSE keepalive + `CLAUDE_TIMEOUT_MS` 600000。教訓：多接模型的「不穩」幾乎全在外掛 CLI 那層（context/timeout/idle-disconnect/launchd），GPT passthrough 本身穩；對症調 timeout/keepalive/context 比精簡或回滾更符合使用者要保留全模型的需求。調校已寫進 installer 預設（同名 env 可覆寫），server.js 不被 installer 覆寫故 heartbeat 改動 durable。
-- 2026-06-03：Pro 帳號「假撞限額」事故鏈（抽象化）。(1) **OAuth refresh-token 輪換競爭**會偽裝成「帳號沒付費/撞限額」——本機 token claim 是付費方案但後端按 free 限額回應，就是壞 session 的指紋。正解：靜默所有 `auth.json` 消費者（quit App → 殺 `codex app-server` → bootout gateway）→ 乾淨 `codex logout && codex login` → 逐一開回；不要手刻後端請求診斷（重放會加重 session 失效），用正規 client 測。(2) gateway 重啟窗口可能讓 Codex 把 fallback catalog 寫進 `models_cache.json`，多模下拉只剩 GPT；備份後清 cache 重抓即解，與 sidebar provider-split 是不同問題。(3) 影像模型 slug 走訂閱 `/responses` passthrough 必失敗（endpoint 不服務影像），是已知限制非新 bug。
-- 2026-06-08：長工具/長上下文回合仍 `idle timeout waiting for SSE`，即使已有註解式 keepalive。教訓：新版 Codex App / reconnect path 需要 **data-bearing** Responses 事件，SSE comment 可能不算活動。對策：external-model streaming 一開始就送 `response.created`，等待期間定期送 `response.in_progress`，完成時沿用同一 response id；以 regression test 固定。
-- 2026-06-10：auth 輪換競爭**復發**，真兇是第二個 CODEX_HOME（subagent 專用 home）裡的孤兒 `auth.json` 副本——主 session 重登後它仍持舊 token，永遠 401，且舊副本搶刷可能再度弄壞主 session。對策三件：(1) 子 home 的 `auth.json` 一律 symlink 指向主 `auth.json`，不留獨立副本；(2) `post-update-check.sh` 新增 `[5b]` auth 單一真相源檢查（多副本 inode 分歧即 warn + 給修復指令）；(3) **`codex login` 會重寫 `config.toml` 並丟掉 `service_tier` 等自訂鍵**，重登後必跑一次 `post-update-check.sh`（[1] 區塊抓得到）。另：安裝器 `MINIMAX_TIMEOUT_MS` 預設 120s→480s（長上下文首包會超 120s 被誤判網路錯誤）；server.js 對 `GATEWAY_MAX_BODY_BYTES` 加 NaN/負值守衛。
+- 2026-06-01：Codex App app-server 必須與 App bundle binary 同源；PATH 上的穩定版 CLI 啟動 app-server/proxy，可能和 App 內 alpha/prerelease binary handshake 不相容，造成 initialize handshake timeout / reconnect storm。對策：只把 `codex app-server*` 路由到 App bundle binary，普通 CLI 可保留 Homebrew 版。
+- 2026-06-01：GPT passthrough 的 client cancellation 不能讓 gateway 崩潰。對策：client-gone/AbortError 是正常控制流，runtime 要 abort upstream、清理 reader、吞掉 AbortError；只有真正 timeout 才回 504，並用 regression test 固定。
+- 2026-06-03：Pro 帳號的「假撞限額」事故鏈，三個獨立 failure mode 連環登場，逐一誤判浪費多輪。教訓：(1) **OAuth refresh-token 輪換競爭**最會偽裝成「帳號沒付費/撞限額」── token claim=pro 但後端=free 就是壞 session 的指紋，正解是靜默全部 auth.json 消費者後乾淨重登再逐一開回，而不是去查 billing 或重啟 App；診斷時手刻後端請求會加重 session 失效，要用正規 client。(2) gateway 重啟窗口會讓 Codex 把 **fallback catalog 寫進 `models_cache.json`**，多模下拉只剩 GPT；清 cache 重抓即解，別跟 sidebar provider-split 搞混。(3) **影像模型 `gpt-image-*` 走 `/responses` passthrough 必失敗**（endpoint 不服務影像、gateway 無 image route），是已知限制非新 bug，常隨底層壞 turn 修好而消失。三者全非 gateway 程式崩潰 ── 對症（重登/清cache/標記限制）比重啟或回滾準。**待辦**：可考慮對 image slug 在 server.js 回乾淨 completed message（目前仍是 raw upstream error）。
+- 2026-06-08：切到 Opus 後長工具/長上下文回合仍會 `idle timeout waiting for SSE`，即使 gateway 已有註解式 keepalive。教訓：新版 Codex App / reconnect path 需要 data-bearing Responses 事件，SSE comment 可能不算活動。對策：external-model streaming 一開始就送 `response.created`，等待期間送 `response.in_progress`，完成時沿用同一 response id；補 regression test `Claude long buffered streams emit semantic in-progress heartbeats before completion`；同時把 `post-update-check.sh` 納入 `model_reasoning_effort=low`、`service_tier=fast`、auto-compact scope、catalog low 檢查，避免 Opus 日常預設跑太重。
+- 2026-06-10：auth 輪換競爭**復發**，真兇是第二個 CODEX_HOME（subagent 專用 home）裡的孤兒 `auth.json` 副本——主 session 重登後它仍持舊 token，永遠 401 且搶刷會再弄壞主 session。對策三件：(1) 子 home 的 auth.json 一律 symlink 指向主 `auth.json`，不留獨立副本；(2) `post-update-check.sh` 新增 `[5b]` auth 單一真相源檢查（多副本 inode 分歧即 warn + 給修復指令），6/3 待辦完成；(3) 新教訓：**`codex login` 會重寫 `config.toml` 並丟掉 `service_tier` 等自訂鍵**，重登後必跑一次 post-update-check（[1] 區塊抓得到）。另：安裝器 `MINIMAX_TIMEOUT_MS` 預設 120s→480s（M3 長上下文首包會超 120s 被誤判網路錯誤）；server.js 對 `GATEWAY_MAX_BODY_BYTES` 加 NaN/負值守衛（負值原本會讓所有請求恆 413）。
 - 2026-06-10（第二輪）：三項適配性升級落地並 24/24 test 綠。(1) **Claude 真 streaming**：text-only turn 改走 `claude -p --output-format stream-json --include-partial-messages`，gateway 逐行轉成 `response.output_text.delta` 增量事件（added→part.added→delta*→done→part.done→item.done→completed，id 全程一致；thinking_delta 永不外流）；工具橋 turn 維持 buffered（工具意圖 JSON 不能以可見文字流出）；`CLAUDE_STREAMING=0` 退回 buffered；首 delta 前失敗可換 candidate，之後 commit、失敗以標記清楚的 gateway notice 完結（不發 response.failed 避免 retry storm）。實測 11 個增量 delta。(2) **usage 記帳**：claude/minimax/grok 結果的 usage 正規化進 `response.completed`（cache tokens 計入 input、cached_tokens 明細），這是 Codex App 對 custom provider 做 token accounting / auto-compact 的必要前置——只宣稱補齊記帳，端到端自動壓縮需長 thread 實測。(3) **error_kind 觀測**：/healthz route state 新增 `error_kind`（auth/quota/timeout/spawn/output_cap/model/network/parse/unknown）、`last_error_at`、`candidate_hits`（重啟歸零），不洩 error 原文。注意：streaming 上線後「completed assistant item」測試的選擇器要選 `output_item.done`，因為 `output_item.added` 也是 message item。

@@ -8,7 +8,7 @@ run_grok="${RUN_GROK_SMOKE:-1}"
 run_minimax="${RUN_MINIMAX_SMOKE:-0}"
 run_app_server="${RUN_APP_SERVER_SMOKE:-1}"
 run_same_thread="${RUN_SAME_THREAD_SMOKE:-1}"
-models_re='^(gpt-5\.5|opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6|fable-5|grok-build|minimax-m3)$'
+models_re='^(gpt-5\.5|chatgpt-pro-consult|opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6|fable-5|grok-build|minimax-m3)$'
 claude_models=(opus-4-7 opus-4-8 sonnet-4-6 haiku-4-6 fable-5)
 grok_models=(grok-build)
 minimax_models=(minimax-m3)
@@ -67,7 +67,7 @@ fi
 catalog="$(curl -fsS "$gateway_url/v1/models" 2>/tmp/codex-gateway-models.err || true)"
 if [[ -n "$catalog" ]]; then
   missing=0
-  for slug in gpt-5.5 "${claude_models[@]}" "${grok_models[@]}" "${minimax_models[@]}"; do
+  for slug in gpt-5.5 chatgpt-pro-consult "${claude_models[@]}" "${grok_models[@]}" "${minimax_models[@]}"; do
     if ! jq -e --arg slug "$slug" '.models[]? | select(.slug == $slug)' >/dev/null <<<"$catalog"; then
       fail "gateway catalog missing $slug"
       missing=1
@@ -88,7 +88,7 @@ if command -v codex >/dev/null 2>&1; then
   debug_models="$(codex debug models -c model_provider='"model_gateway"' 2>/tmp/codex-debug-models.err | jq -r '.models[]?.slug' || true)"
   if printf '%s\n' "$debug_models" | rg -q "$models_re"; then
     missing=0
-    for slug in gpt-5.5 "${claude_models[@]}" "${grok_models[@]}" "${minimax_models[@]}"; do
+    for slug in gpt-5.5 chatgpt-pro-consult "${claude_models[@]}" "${grok_models[@]}" "${minimax_models[@]}"; do
       if ! printf '%s\n' "$debug_models" | rg -qx "$slug"; then
         fail "codex debug models missing $slug"
         missing=1
@@ -104,7 +104,7 @@ fi
 
 gpt_no_auth="$(curl -sS -N "$gateway_url/v1/responses" \
   -H 'content-type: application/json' \
-  -d '{"model":"gpt-5.5","input":"no auth should fail","stream":true}' || true)"
+  -d '{"model":"chatgpt-pro-consult","input":"no auth should fail","stream":true}' || true)"
 if printf '%s\n' "$gpt_no_auth" | rg -q 'Authorization headers' && printf '%s\n' "$gpt_no_auth" | rg -q '"status":401'; then
   pass "GPT passthrough rejects requests without Codex session authorization"
 else
@@ -195,6 +195,11 @@ if [[ "$run_claude" == "1" ]]; then
          printf '%s\n' "$out" | rg -q 'response.output_item.done' &&
          printf '%s\n' "$out" | rg -q 'response.completed'; then
       pass "Claude live smoke $model"
+    elif [[ "$model" == "fable-5" ]] &&
+         printf '%s\n' "$out" | rg -qi 'temporarily unavailable|currently unavailable|model unavailable' &&
+         printf '%s\n' "$out" | rg -q 'response.output_item.done' &&
+         printf '%s\n' "$out" | rg -q 'response.completed'; then
+      note "Claude live smoke $model completed as visible backend-unavailable notice (no retry loop)"
     else
       fail "Claude live smoke incomplete for $model"
     fi

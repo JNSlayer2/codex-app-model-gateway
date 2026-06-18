@@ -26,6 +26,14 @@ const CHATGPT_CODEX_BASE_URL =
   (process.env.CHATGPT_CODEX_BASE_URL || "https://chatgpt.com/backend-api/codex").replace(/\/+$/, "");
 
 const gptRoutes = {
+  "chatgpt-pro-consult": {
+    display_name: "ChatGPT Pro Consult",
+    priority: 101,
+    upstream_model: "gpt-5.5",
+    role: "codex_native_consultant",
+    description:
+      "Codex-native ChatGPT Pro consultant lane. Uses the same Codex ChatGPT subscription passthrough as GPT-5.5, but is labeled for bounded research, planning, and review inside the current Codex thread.",
+  },
   "gpt-5.5": { display_name: "GPT-5.5", priority: 100 },
   "gpt-5.4": { display_name: "GPT-5.4", priority: 99 },
   "gpt-5.4-mini": { display_name: "GPT-5.4 Mini", priority: 98 },
@@ -33,6 +41,10 @@ const gptRoutes = {
   "gpt-5.3-codex-spark": { display_name: "GPT-5.3 Codex Spark", priority: 96 },
   "gpt-5.2": { display_name: "GPT-5.2", priority: 95 },
   "codex-auto-review": { display_name: "Codex Auto Review", priority: 94 },
+};
+
+const gptAliases = {
+  "chatgpt-pro": "chatgpt-pro-consult",
 };
 
 const claudeRoutes = {
@@ -129,7 +141,7 @@ function classifyErrorKind(text, signal) {
   if (/stdout exceeded|output.*exceeded.*bytes/i.test(s)) return "output_cap";
   if (/not authenticated|unauthorized|invalidated|forbidden|invalid api key|login|oauth|\b401\b|\b403\b/i.test(s)) return "auth";
   if (/rate limit|rate_limit|quota|usage limit|session limit|resets|billing|credit|payment|\b429\b/i.test(s)) return "quota";
-  if (/invalid model|unknown model|model .*not|not available|unsupported model/i.test(s)) return "model";
+  if (/invalid model|unknown model|model .*not|not available|currently unavailable|unavailable|unsupported model/i.test(s)) return "model";
   if (/ECONN|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|socket|fetch failed|network/i.test(s)) return "network";
   if (/empty output|JSON|parse/i.test(s)) return "parse";
   return "unknown";
@@ -185,6 +197,19 @@ function makeRouteState(routes) {
 const routeState = makeRouteState(claudeRoutes);
 const grokRouteState = makeRouteState(grokRoutes);
 const minimaxRouteState = makeRouteState(minimaxRoutes);
+
+function gptRouteForModel(model) {
+  const slug = gptAliases[model] || model;
+  const route = gptRoutes[slug];
+  return route ? { slug, route } : null;
+}
+
+function gptPassthroughBodyText(bodyText, upstreamModel) {
+  if (!upstreamModel) return bodyText;
+  const body = JSON.parse(bodyText || "{}");
+  body.model = upstreamModel;
+  return JSON.stringify(body);
+}
 
 function json(res, status, payload) {
   const body = JSON.stringify(payload, null, 2);
@@ -285,7 +310,9 @@ function buildModelEntry(slug, displayName, priority, o) {
 function modelsPayload() {
   const gptModels = Object.entries(gptRoutes).map(([slug, route]) =>
     buildModelEntry(slug, route.display_name, route.priority, {
-      description: "GPT model routed through local model_gateway to the Codex ChatGPT subscription endpoint.",
+      description:
+        route.description ||
+        "GPT model routed through local model_gateway to the Codex ChatGPT subscription endpoint.",
       base_instructions: gptBaseInstructions,
       supports_reasoning_summaries: true,
       default_reasoning_summary: "auto",
@@ -302,7 +329,9 @@ function modelsPayload() {
         computer_use: "passthrough",
         backend: "chatgpt_subscription",
         api_spend: "subscription_passthrough_not_api_key",
-        isolation: "codex_first_party",
+        isolation: route.role ? "codex_first_party_same_thread" : "codex_first_party",
+        role: route.role || "codex_primary",
+        upstream_model: route.upstream_model || slug,
       },
     }),
   );
@@ -447,6 +476,8 @@ function healthPayload() {
             display_name: route.display_name,
             backend: "chatgpt_subscription",
             passthrough: true,
+            role: route.role || "codex_primary",
+            upstream_model: route.upstream_model || slug,
           },
         ]),
       ),
@@ -633,7 +664,7 @@ function isModelError(text) {
 
 function isBackendNoticeError(error) {
   const text = String(error?.message || "");
-  return /session limit|rate limit|rate_limit|resets|quota|usage limit|disabled by policy|not authenticated|unauthorized|forbidden|invalid api key|api key|billing|credit|payment|login|oauth|subscription|401|403|429/i.test(text);
+  return /session limit|rate limit|rate_limit|resets|quota|usage limit|disabled by policy|not authenticated|unauthorized|forbidden|invalid api key|api key|billing|credit|payment|login|oauth|subscription|currently unavailable|unavailable|not available|unsupported model|invalid model|unknown model|401|403|429/i.test(text);
 }
 
 function backendNoticeText(model, error) {
@@ -1624,7 +1655,7 @@ function copyResponseHeaders(upstream, res) {
   }
 }
 
-async function proxyChatgpt(req, res, bodyText, stream) {
+async function proxyChatgpt(req, res, bodyText, stream, upstreamModel = null) {
   if (!req.headers.authorization) {
     const message = "GPT passthrough requires Codex ChatGPT Authorization headers from the active Codex session.";
     if (!stream) return json(res, 401, { error: { message } });
@@ -1660,7 +1691,7 @@ async function proxyChatgpt(req, res, bodyText, stream) {
     upstream = await fetch(`${CHATGPT_CODEX_BASE_URL}/responses`, {
       method: "POST",
       headers: passthroughHeaders(req),
-      body: bodyText,
+      body: gptPassthroughBodyText(bodyText, upstreamModel),
       signal: controller.signal,
     });
   } catch (error) {
@@ -1732,8 +1763,9 @@ async function handleResponses(req, res) {
   const toolSpecs = extractToolSpecs(body);
   const routeKind = claudeRoutes[routeModel] ? "claude" : grokRoutes[model] ? "grok" : minimaxRoutes[model] ? "minimax" : null;
   if (!routeKind) {
-    if (isOfficialOpenAiSlug(model)) {
-      return proxyChatgpt(req, res, bodyText, stream);
+    const gptRoute = gptRouteForModel(model);
+    if (gptRoute || isOfficialOpenAiSlug(model)) {
+      return proxyChatgpt(req, res, bodyText, stream, gptRoute?.route.upstream_model || null);
     }
     return json(res, 404, { error: { message: `unknown model slug: ${model}` } });
   }
