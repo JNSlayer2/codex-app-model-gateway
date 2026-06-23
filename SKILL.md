@@ -13,6 +13,23 @@ metadata:
 
 **穩定交付的 UI 定義**：不只 gateway health、catalog 與 live smoke 要綠，Codex App 左側專案列表也不能因 provider split 顯示「沒有聊天」。若全域 `model_provider` 已切到 `model_gateway`，未封存 `openai` threads 必須經一次性備份後合併到 `model_gateway`，否則 App 可能只顯示 gateway threads，讓舊專案看似消失。
 
+## Tatwo Ultrawork M2 接線結論
+
+Tatwo Ultrawork M2 可以把 gateway 當成正式工作流底座使用，但它不是 M3 UI 完成版。gateway 的責任是穩定提供單一 `model_gateway` provider、同 thread 切模型、GPT fast consult、外部模型 request-scoped tool intent；Tatwo Ultrawork 的責任是模式、分工、預算、驗證與停止條件。
+
+M2 host promotion 不可由模型文字自評通過，必須同時有這些可重跑證據：
+
+- host config / state 已備份，且備份不包含要提交到 GitHub 的 auth、SQLite、models cache 或 raw logs。
+- rollback plan 可驗證需要的備份檔存在。
+- live same-thread smoke 通過：`gpt-5.5 -> 外部模型 -> gpt-5.5` 在同一條 thread 保持上下文。
+- route live smoke bundle 覆蓋高風險外部 route，且以 `response.completed` 或可見 backend notice 結束，不造成 retry storm。
+- host MCP registration smoke 證明 Codex host 真的註冊到 Tatwo MCP，不只是一個 stdio 相容測試。
+- redaction scan 通過；GitHub 版本不放本機絕對路徑、receipt 原始 bundle、私人 thread id、raw screenshots、token 或 session state。
+
+Same-thread verifier 的 GPT 預設路由必須是 `gpt-5.5`。`chatgpt-pro-consult` / `chatgpt-pro` 只能是 hidden/deprecated compatibility alias，不得列入 catalog、debug models、dropdown 或正式 same-thread 驗收主路線。ChatGPT Pro MCP 是 bounded Research / Plan / Review lane，不是 gateway dropdown model。
+
+Verifier 建臨時 `CODEX_HOME` 時要最小化插件載入：只載本次 smoke 必要 config，禁用無關或會要求互動登入的插件 / MCP（例如會因 invalid token 讓 app-server 斷線的第三方插件）。這不是移除使用者正式環境的插件，而是讓 smoke 測到 gateway/thread continuity，不被旁支 auth 噪音污染。
+
 ## 一鍵部署 / 維修（每台機器先跑這個）
 
 > **給 AI 安裝代理（照這個跑）**：依序執行下面三步，以 exit code 判成敗（`0`=成功）。
