@@ -1,3 +1,9 @@
+> [!IMPORTANT]
+> 最新版本請移至 **Tatwo Ultrawork**：https://github.com/tatwo214/tatwo-ultrawork
+> Latest version has moved to **Tatwo Ultrawork**: https://github.com/tatwo214/tatwo-ultrawork
+>
+> This repository is kept as a legacy JNSLayer2 reference for historical gateway / workflow details.
+
 # Codex App Model Gateway (v4)
 
 讓 Codex App 只用**單一 provider** `model_gateway`，在**同一條 thread 內自由切換 GPT / Claude（含 Fable5）/ Grok / MiniMax**——只切 `model`，不切 provider。不修改 signed Codex App bundle。`chatgpt-pro-consult` 已降級為隱藏相容 alias，不再出現在 dropdown。
