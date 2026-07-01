@@ -140,7 +140,7 @@ test("model catalog exposes GPT, Claude, Grok, and MiniMax slugs while hiding de
       "gpt-5.5",
       "opus-4-7",
       "opus-4-8",
-      "sonnet-4-6",
+      "sonnet-5",
       "haiku-4-6",
       "fable-5",
       "grok-build",
@@ -149,6 +149,7 @@ test("model catalog exposes GPT, Claude, Grok, and MiniMax slugs while hiding de
     true,
   );
   assert.equal(catalog.models.some((model) => model.slug === "chatgpt-pro-consult"), false);
+  assert.equal(catalog.models.some((model) => model.slug === "sonnet-4-6"), false);
   const gpt55 = catalog.models.find((model) => model.slug === "gpt-5.5");
   assert.equal(gpt55.display_name, "GPT-5.5");
   assert.equal(gpt55.capabilities.backend, "chatgpt_subscription");
@@ -353,7 +354,7 @@ test("oversized requests return a clean 413 instead of resetting the socket", as
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      model: "sonnet-4-6",
+      model: "sonnet-5",
       input: "x".repeat(4096),
       stream: true,
     }),
@@ -382,7 +383,7 @@ test("Claude prompt bridge emits Codex function_call events without executing to
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      model: "sonnet-4-6",
+      model: "sonnet-5",
       input: [
         {
           type: "message",
@@ -605,6 +606,23 @@ test("compact Claude slugs remain accepted as aliases", async (t) => {
 
   assert.equal(res.status, 200);
   assert.equal(body.output_text, "OK_LEGACY_ALIAS");
+
+  const oldSonnetRes = await fetch(`http://127.0.0.1:${gateway.port}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "sonnet-4-6",
+      input: "old sonnet selection should route to sonnet 5",
+      stream: false,
+    }),
+  });
+  const oldSonnetBody = await oldSonnetRes.json();
+
+  assert.equal(oldSonnetRes.status, 200);
+  assert.equal(oldSonnetBody.output_text, "OK_LEGACY_ALIAS");
+  const health = await requestJson(`http://127.0.0.1:${gateway.port}/healthz`);
+  assert.equal(health.routes["sonnet-5"].attempts, 1);
+  assert.deepEqual(health.routes["sonnet-5"].candidate_hits, { "claude-sonnet-5": 1 });
 });
 
 
@@ -907,7 +925,7 @@ test("external models fail closed when they request a tool not exposed in the cu
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      model: "sonnet-4-6",
+      model: "sonnet-5",
       input: [
         {
           type: "message",
@@ -1023,7 +1041,7 @@ test("Claude buffered responses propagate normalized usage for token accounting"
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      model: "sonnet-4-6",
+      model: "sonnet-5",
       stream: false,
       input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
     }),

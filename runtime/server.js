@@ -63,9 +63,9 @@ const claudeRoutes = {
     candidates: ["claude-opus-4-8[1m]", "claude-opus-4-8", "opus-4-8", "opus"],
     context_window: 1000000,
   },
-  "sonnet-4-6": {
-    display_name: "sonnet4.6",
-    candidates: ["claude-sonnet-4-6", "sonnet-4-6", "sonnet"],
+  "sonnet-5": {
+    display_name: "sonnet5",
+    candidates: ["claude-sonnet-5", "sonnet-5", "sonnet"],
   },
   "haiku-4-6": {
     display_name: "haiku4.6",
@@ -81,7 +81,12 @@ const claudeRoutes = {
 const claudeAliases = {
   "opus4.7": "opus-4-7",
   "opus4.8": "opus-4-8",
-  "sonnet4.6": "sonnet-4-6",
+  "sonnet5": "sonnet-5",
+  // Hidden compatibility aliases: older UI/config selections now route to Sonnet 5,
+  // but the public catalog only exposes the current Sonnet lane.
+  "sonnet4.6": "sonnet-5",
+  "sonnet-4-6": "sonnet-5",
+  "claude-sonnet-4-6": "sonnet-5",
   "haiku4.6": "haiku-4-6",
   "fable5": "fable-5",
 };
