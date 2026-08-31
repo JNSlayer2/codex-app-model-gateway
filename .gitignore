@@ -1,6 +1,15 @@
 .DS_Store
 ._*
 .env*
+.npmrc
+.netrc
+id_*
+known_hosts
+config.toml
+credentials.json
+cookies*.json
+session*.json
+*.har
 
 # logs & build junk
 *.log
@@ -21,6 +30,10 @@ rollout*.jsonl
 *.pem
 *.key
 *.p12
+*.pfx
+*.crt
+*.cer
+*.der
 
 # machine-specific generated plist (installer renders it per machine)
 com.*.codex-model-gateway.plist

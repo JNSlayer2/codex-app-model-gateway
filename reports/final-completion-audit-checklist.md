@@ -43,11 +43,10 @@ git status --short
 Hygiene scan:
 
 ```bash
-rg -n '(/Users/|/Volumes/|019e[0-9a-f-]|auth\.json|Bearer [A-Za-z0-9._-]{10,}|app\.asar|renderer asset|signature bypass|repair bypass)' \
-  README.md SKILL.md scripts reports references gateway
+sh scripts/security-scan.sh
 ```
 
-Expected hygiene hits are limited to generic warnings, placeholder paths such as `<gateway-dir>`, and test fixtures such as `Bearer test-token`.
+The scan must exit successfully before publishing.
 
 ## Completion Rule
 

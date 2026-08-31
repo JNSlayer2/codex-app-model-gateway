@@ -87,6 +87,7 @@ async function startGateway(env = {}) {
       ...process.env,
       MODEL_GATEWAY_HOST: "127.0.0.1",
       MODEL_GATEWAY_PORT: String(port),
+      GATEWAY_TEST_MODE: "1",
       ...env,
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -236,6 +237,8 @@ test("GPT models are proxied to the ChatGPT Codex subscription endpoint", async 
       "session-id": "session-123",
       "thread-id": "thread-123",
       originator: "codex_cli",
+      cookie: "local-cookie-must-not-leave-device",
+      "x-local-debug-marker": "must-not-leave-device",
     },
     body: JSON.stringify({
       model: "gpt-5.5",
@@ -255,6 +258,8 @@ test("GPT models are proxied to the ChatGPT Codex subscription endpoint", async 
   assert.equal(upstream.seen[0].headers["chatgpt-account-id"], "account-123");
   assert.equal(upstream.seen[0].headers["session-id"], "session-123");
   assert.equal(upstream.seen[0].headers["thread-id"], "thread-123");
+  assert.equal(upstream.seen[0].headers.cookie, undefined);
+  assert.equal(upstream.seen[0].headers["x-local-debug-marker"], undefined);
   assert.equal(upstream.seen[0].body.model, "gpt-5.5");
 });
 
@@ -903,7 +908,7 @@ test("external models fail closed when they claim GUI actions without matching f
   const failed = events.find((event) => event.type === "response.failed");
 
   assert.equal(res.status, 200);
-  assert.match(failed.error.message, /claimed GUI\/computer-use actions without matching function_call evidence/);
+  assert.equal(failed.error.message, "request failed");
   assert.equal(failed.error.status, 424);
 });
 
@@ -953,7 +958,7 @@ test("external models fail closed when they request a tool not exposed in the cu
 
   assert.equal(res.status, 200);
   assert.equal(fabricated, undefined);
-  assert.match(failed.error.message, /not exposed in this Codex request/);
+  assert.equal(failed.error.message, "request failed");
   assert.equal(failed.error.status, 502);
 });
 

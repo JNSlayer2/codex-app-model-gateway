@@ -7,7 +7,12 @@ const crypto = require("crypto");
 const fs = require("fs");
 
 const HOST = process.env.MODEL_GATEWAY_HOST || "127.0.0.1";
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
+if (!LOOPBACK_HOSTS.has(HOST)) {
+  throw new Error("MODEL_GATEWAY_HOST must be a loopback address");
+}
 const PORT = Number(process.env.MODEL_GATEWAY_PORT || 4177);
+const TEST_MODE = process.env.GATEWAY_TEST_MODE === "1";
 const CLAUDE_TIMEOUT_MS = Number(process.env.CLAUDE_TIMEOUT_MS || 120000);
 const HEARTBEAT_MS = Number(process.env.GATEWAY_HEARTBEAT_MS || 15000);
 // Default reasoning level advertised for EVERY model in the picker. "low" = fast
@@ -24,6 +29,22 @@ const MINIMAX_API_SPEND_CLASS = process.env.MINIMAX_API_SPEND_CLASS || "minimax-
 const MAX_CHILD_STDOUT = Number(process.env.MAX_CHILD_STDOUT_BYTES || 8 * 1024 * 1024);
 const CHATGPT_CODEX_BASE_URL =
   (process.env.CHATGPT_CODEX_BASE_URL || "https://chatgpt.com/backend-api/codex").replace(/\/+$/, "");
+
+function childEnvironment() {
+  const exact = new Set([
+    "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM",
+    "USER", "LOGNAME", "SHELL", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
+  ]);
+  return Object.fromEntries(
+    Object.entries(process.env).filter(([name]) => exact.has(name) || name.startsWith("LC_")),
+  );
+}
+
+function publicError(error, fallback = "request failed") {
+  const status = Number(error?.status) || 500;
+  if (status >= 500) return { message: fallback, status };
+  return { message: String(error?.publicMessage || fallback), status };
+}
 
 const gptRoutes = {
   "chatgpt-pro-consult": {
@@ -841,7 +862,7 @@ function normalizeMiniMaxResponse(payload) {
 }
 
 async function runMiniMaxOnce(model, prompt) {
-  if (process.env.MINIMAX_MOCK_RESPONSE_JSON !== undefined) {
+  if (TEST_MODE && process.env.MINIMAX_MOCK_RESPONSE_JSON !== undefined) {
     return {
       ok: true,
       model,
@@ -852,7 +873,7 @@ async function runMiniMaxOnce(model, prompt) {
       usage: null,
     };
   }
-  if (process.env.MINIMAX_MOCK_ERROR_TEXT !== undefined) {
+  if (TEST_MODE && process.env.MINIMAX_MOCK_ERROR_TEXT !== undefined) {
     return {
       ok: false,
       model,
@@ -981,17 +1002,17 @@ async function runMiniMax(slug, prompt) {
 function runClaudeOnce(model, prompt) {
   return new Promise((resolve) => {
     const resolveMock = (payload) => {
-      const delayMs = Number(process.env.CLAUDE_MOCK_DELAY_MS || 0);
+      const delayMs = TEST_MODE ? Number(process.env.CLAUDE_MOCK_DELAY_MS || 0) : 0;
       if (delayMs > 0) {
         setTimeout(() => resolve(payload), delayMs).unref?.();
         return;
       }
       resolve(payload);
     };
-    if (process.env.CLAUDE_MOCK_PROMPT_FILE) {
+    if (TEST_MODE && process.env.CLAUDE_MOCK_PROMPT_FILE) {
       fs.writeFileSync(process.env.CLAUDE_MOCK_PROMPT_FILE, prompt);
     }
-    if (process.env.CLAUDE_MOCK_ERROR_TEXT !== undefined) {
+    if (TEST_MODE && process.env.CLAUDE_MOCK_ERROR_TEXT !== undefined) {
       resolveMock({
         ok: false,
         model,
@@ -1003,7 +1024,7 @@ function runClaudeOnce(model, prompt) {
       });
       return;
     }
-    if (process.env.CLAUDE_MOCK_RESPONSE_JSON !== undefined) {
+    if (TEST_MODE && process.env.CLAUDE_MOCK_RESPONSE_JSON !== undefined) {
       let mockUsage = null;
       try { mockUsage = JSON.parse(process.env.CLAUDE_MOCK_USAGE_JSON || "null"); } catch {}
       resolveMock({
@@ -1019,7 +1040,7 @@ function runClaudeOnce(model, prompt) {
     }
     const child = spawn(CLAUDE_COMMAND, claudeArgs(model, prompt), {
       cwd: "/tmp",
-      env: { ...process.env },
+      env: childEnvironment(),
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
@@ -1142,7 +1163,7 @@ function runClaudeStreamingOnce(model, prompt, onDelta) {
   // Buffered-mock delegation keeps the existing test/mocking surface working:
   // the handler emits the full text as a single delta when none were streamed.
   if (
-    process.env.CLAUDE_MOCK_STREAM_JSONL === undefined &&
+    TEST_MODE && process.env.CLAUDE_MOCK_STREAM_JSONL === undefined &&
     (process.env.CLAUDE_MOCK_RESPONSE_JSON !== undefined || process.env.CLAUDE_MOCK_ERROR_TEXT !== undefined)
   ) {
     return runClaudeOnce(model, prompt).then((result) => ({ ...result, accumulated: "" }));
@@ -1187,7 +1208,7 @@ function runClaudeStreamingOnce(model, prompt, onDelta) {
         usage: finalEvent?.usage || null,
       });
     };
-    if (process.env.CLAUDE_MOCK_STREAM_JSONL !== undefined) {
+    if (TEST_MODE && process.env.CLAUDE_MOCK_STREAM_JSONL !== undefined) {
       if (process.env.CLAUDE_MOCK_PROMPT_FILE) fs.writeFileSync(process.env.CLAUDE_MOCK_PROMPT_FILE, prompt);
       for (const line of String(process.env.CLAUDE_MOCK_STREAM_JSONL).split("\n")) handleLine(line);
       finalize(0, null, "");
@@ -1195,7 +1216,7 @@ function runClaudeStreamingOnce(model, prompt, onDelta) {
     }
     const child = spawn(CLAUDE_COMMAND, claudeStreamArgs(model, prompt), {
       cwd: "/tmp",
-      env: { ...process.env },
+      env: childEnvironment(),
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stderr = "";
@@ -1314,10 +1335,10 @@ function normalizeGrokResult(stdout) {
 
 function runGrokOnce(model, prompt) {
   return new Promise((resolve) => {
-    if (process.env.GROK_MOCK_PROMPT_FILE) {
+    if (TEST_MODE && process.env.GROK_MOCK_PROMPT_FILE) {
       fs.writeFileSync(process.env.GROK_MOCK_PROMPT_FILE, prompt);
     }
-    if (process.env.GROK_MOCK_RESPONSE_JSON !== undefined) {
+    if (TEST_MODE && process.env.GROK_MOCK_RESPONSE_JSON !== undefined) {
       resolve({
         ok: true,
         model,
@@ -1331,7 +1352,7 @@ function runGrokOnce(model, prompt) {
     }
     const child = spawn(GROK_COMMAND, grokArgs(model, prompt), {
       cwd: "/tmp",
-      env: { ...process.env },
+      env: childEnvironment(),
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
@@ -1737,10 +1758,27 @@ const hopByHopHeaders = new Set([
   "upgrade",
 ]);
 
+const upstreamRequestHeaders = new Set([
+  "accept",
+  "authorization",
+  "chatgpt-account-id",
+  "content-type",
+  "conversation-id",
+  "originator",
+  "session-id",
+  "thread-id",
+  "traceparent",
+  "tracestate",
+  "user-agent",
+  "x-openai-client-user-agent",
+]);
+
 function passthroughHeaders(req) {
   const headers = {};
   for (const [name, value] of Object.entries(req.headers)) {
-    if (hopByHopHeaders.has(name.toLowerCase())) continue;
+    const lower = name.toLowerCase();
+    if (hopByHopHeaders.has(lower)) continue;
+    if (!upstreamRequestHeaders.has(lower) && !lower.startsWith("x-stainless-")) continue;
     if (Array.isArray(value)) {
       headers[name] = value.join(", ");
     } else if (value != null) {
@@ -1813,7 +1851,7 @@ async function proxyChatgpt(req, res, bodyText, stream, upstreamModel = null) {
       }
       return;
     }
-    const message = `GPT subscription passthrough failed before upstream response: ${error.message}`;
+    const message = "GPT subscription passthrough failed before upstream response";
     if (!stream) return json(res, 502, { error: { message } });
     res.writeHead(200, {
       "content-type": "text/event-stream; charset=utf-8",
@@ -2022,14 +2060,15 @@ async function handleResponses(req, res) {
       res.end();
       return;
     }
+    const safeError = publicError(error);
     const payload = {
       type: "response.failed",
       error: {
-        message: error.message,
-        status: error.status || 500,
+        message: safeError.message,
+        status: safeError.status,
       },
     };
-    if (!stream) return json(res, error.status || 500, { error: payload.error });
+    if (!stream) return json(res, safeError.status, { error: payload.error });
     sse(res, payload);
     res.end();
   } finally {
@@ -2054,8 +2093,9 @@ const server = http.createServer(async (req, res) => {
     return json(res, 404, { error: { message: "not found" } });
   } catch (error) {
     if (res.writableEnded) return;
-    console.error("request handler failed:", error);
-    return json(res, error.status || 500, { error: { message: error.message || "internal server error" } });
+    const safeError = publicError(error, "internal server error");
+    console.error(`request handler failed status=${safeError.status}`);
+    return json(res, safeError.status, { error: safeError });
   }
 });
 
