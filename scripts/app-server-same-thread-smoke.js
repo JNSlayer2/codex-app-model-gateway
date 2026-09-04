@@ -9,7 +9,10 @@ const path = require("node:path");
 const timeoutMs = Number(process.env.APP_SERVER_SAME_THREAD_TIMEOUT_MS || 600000);
 const code = `CODEX_GATEWAY_CONTEXT_${Date.now()}`;
 const gptModel = process.env.SAME_THREAD_GPT_MODEL || "gpt-5.5";
-const claudeThreadModels = (process.env.SAME_THREAD_CLAUDE_MODELS || "opus-4-7,opus-4-8,sonnet-4-6,haiku-4-6")
+// Same-thread continuity is a route-switch receipt, not a full Claude-family benchmark.
+// Keep the default focused on the current high-risk external route (Fable5);
+// broader sweeps can opt in with SAME_THREAD_CLAUDE_MODELS=opus-4-7,opus-4-8,sonnet-5,haiku-4-5,fable-5.
+const claudeThreadModels = (process.env.SAME_THREAD_CLAUDE_MODELS || "fable-5")
   .split(",")
   .map((model) => model.trim())
   .filter(Boolean);

@@ -1,9 +1,3 @@
-> [!IMPORTANT]
-> 最新版本請移至 **Tatwo Ultrawork**：https://github.com/tatwo214/tatwo-ultrawork
-> Latest version has moved to **Tatwo Ultrawork**: https://github.com/tatwo214/tatwo-ultrawork
->
-> This repository is kept as a legacy JNSLayer2 reference for historical gateway / workflow details.
-
 # Codex App Model Gateway (v4)
 
 讓 Codex App 只用**單一 provider** `model_gateway`，在**同一條 thread 內自由切換 GPT / Claude（含 Fable5）/ Grok / MiniMax**——只切 `model`，不切 provider。不修改 signed Codex App bundle。`chatgpt-pro-consult` 已降級為隱藏相容 alias，不再出現在 dropdown。
@@ -14,9 +8,13 @@ Use a **single provider** `model_gateway` for Codex App, and switch between **GP
 
 - Hides the deprecated `chatgpt-pro-consult` / `chatgpt-pro` alias from the Codex App dropdown. Existing threads can still call it; the gateway rewrites it to `gpt-5.5` for compatibility.
 - Recommended Codex App usage: use `gpt-5.5` directly for GPT fast consult / planning / review. Real ChatGPT Pro Deep Research stays in the async `ProResearchJobV1` handoff lane, not as a fake synchronous dropdown model.
-- Adds `fable-5` / `fable5` as a Claude-family premium route backed by the Claude CLI candidate `claude-fable-5`.
+- Keeps the compatibility route `fable-5` / `fable5`, displays it as `fable5.1`,
+  and pins execution to the exact Claude CLI model `claude-fable-5-1` with a
+  1M context window.
 - Keeps the one-provider design: select `model_gateway` once, then switch `model` inside a thread.
 - Carries long-turn hardening for heavy multi-model work: semantic `response.in_progress` heartbeats, clean `413` for oversized bodies, and safe GPT passthrough cancellation.
+- The 2026-09-04 stable refresh also handles Claude child/descendant cancellation, prevents client disconnects from crashing the gateway, converts quota/auth/session-limit states into one visible completed notice, and verifies 108 deterministic runtime cases.
+- Reasoning levels are provider-native, not cosmetic: GPT `low..xhigh`, Claude/Fable `low..max`, Grok `low..xhigh` via `--reasoning-effort`, and MiniMax M3 advertises none.
 
 ## Companion project / 搭配專案
 

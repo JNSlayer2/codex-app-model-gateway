@@ -7,6 +7,8 @@ metadata:
 
 # Codex App Model Gateway v4
 
+> **Stable refresh — 2026-09-04:** the public runtime now includes the disconnect/retry hardening proven by the local 108-test suite: semantic streaming heartbeats, clean client-cancel handling, completed backend notices for quota/auth states, bounded context compaction, exact provider reasoning mapping, and isolated Grok execution.
+
 > **免責聲明 / Disclaimer**：本工具讓你在自己付費的 Codex App 內把模型切到 Claude / Grok，並讓 GPT 透過你**自己的** ChatGPT 訂閱 session 繼續運作。它只代理「你自己已登入」的 session，不分發、不竊取任何憑證。但「以本機 proxy 轉發 ChatGPT 訂閱 session」可能牴觸 OpenAI ChatGPT 訂閱條款（訂閱條款對自動化／代理／非官方介面通常比 API 條款更嚴）；Claude CLI / Grok CLI 的包裝亦各受其供應商條款約束。**是否使用、是否合規由你自負**，請先自行確認 OpenAI / Anthropic / xAI 當前條款。本 repo 是 public-safe reference；實際帳號、憑證、tunnel 與本機 state 必須留在使用者自己的機器。工具按「現狀（as-is）」提供，無任何擔保。
 
 目標是讓 Codex App 只使用一個穩定 provider：`model_gateway`。同一條 thread 內只切換 `model`，不切換 provider。GPT 走 Codex ChatGPT subscription passthrough；日常 GPT fast consult 直接用 `gpt-5.5`。`chatgpt-pro-consult` 已降級為 **hidden/deprecated compatibility alias**（舊 thread 若仍送這個 model，gateway 只改寫成 `gpt-5.5`），不再出現在 `/v1/models` catalog / dropdown，**不可宣稱等同 ChatGPT App Deep Research**；Claude `opus-4-7`、`opus-4-8`、`sonnet-4-6`、`haiku-4-6`、`fable-5` 走 Claude CLI adapter，display name 用 `opus4.7`、`opus4.8`、`sonnet4.6`、`haiku4.6`、`fable5`；所有工具能力都由 Codex App request-scoped tool bridge 掌握。
@@ -152,12 +154,14 @@ bash scripts/post-update-check.sh --full
 
 Codex App 原生的「fast」切換鍵是 **renderer 寫死綁在原生 `openai` provider** 上的；切到自訂 `model_gateway` provider 後，**任何 catalog 欄位都無法讓那顆鍵出現**（已實測：原生與 gateway 的 gpt-5.5 catalog 逐欄位相同、`service_tiers`/`additional_speed_tiers` 連原生都是空的，差別只在 provider 身分）。要那顆鍵就只能 patch 簽名 App（禁止）或切回原生 provider（失去 dropdown 多模型）。
 
-gateway 端的等效做法：**讓每個模型在選單裡預設停在 fast（低）那一檔**。`buildModelEntry` 的 `default_reasoning_level` 由 `DEFAULT_REASONING_LEVEL`（env `GATEWAY_DEFAULT_REASONING_LEVEL`，預設 `low`）統一供給所有模型。效果：
+gateway 端的等效做法：catalog 對有原生 reasoning control 的模型預設停在 `low`，但**每次 request 都必須把使用者在 Codex 選到的檔位轉成該供應商的原生參數**，不能只改 UI 標籤：
 
-- GPT passthrough：`low` 透傳 ChatGPT，**實際變快**。
-- Claude / MiniMax / Grok：經 gateway **不消費 reasoning_effort**，但本來就快；`low` 讓 App 預設停在快檔、UI 一致（要深度推理就在該 thread 把選單調高，或開 plan mode）。
+- GPT passthrough：`low / medium / high / xhigh` 原樣透傳。
+- Claude family（含 Fable）：`low / medium / high / xhigh / max` 轉成 Claude `--effort`，並以同值覆寫 child process 的 `CLAUDE_CODE_EFFORT_LEVEL`，避免使用者全域 Claude 設定把 Codex 的 `medium` 蓋成 `high` 或 `xhigh`。
+- Grok 4.6：`low / medium / high / xhigh` 轉成 `--reasoning-effort`；Grok CLI 的 `--effort` 是 agent work effort，不可混用。Grok 不支援 `max`，catalog 不得宣告。
+- MiniMax M3：目前不宣告可控 reasoning effort。
 
-搭配 `~/.codex/config.toml` 的 `model_reasoning_effort = "low"` + `service_tier = "fast"`（兩個 config home 都要），即「全模型日常預設 fast」。改完需**完全重開 Codex App**，舊 thread 仍記舊檔。`post-update-check.sh` 已納入此檢查項（全模型 `default_reasoning_level=low`）。
+`model_reasoning_effort` 可以是各啟用 provider 的共同檔位；切換模型時若目標不支援該值就 fail closed，不靜默升級或降級。改完需完全重開 Codex App 才能刷新舊 catalog cache。`post-update-check.sh` 會檢查 provider-specific reasoning matrix。
 
 ## 自動壓縮（auto-compaction）在自訂 provider 下的修法
 

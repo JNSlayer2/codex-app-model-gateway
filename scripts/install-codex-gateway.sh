@@ -55,6 +55,19 @@ c_no(){ printf '  \033[31m✗\033[0m %s\n' "$1"; }
 c_warn(){ printf '  \033[33m!\033[0m %s\n' "$1"; }
 die(){ printf '\033[31mABORT:\033[0m %s\n' "$1" >&2; exit 1; }
 
+# Keep only the N most recent .bak-* copies of a file. These are rollback material,
+# not an archive: without rotation each repair run adds one and they pile up forever
+# (2026-08-24: 21 stale plist + 36 stale config backups found on this machine).
+BACKUP_KEEP="${BACKUP_KEEP:-3}"
+rotate_backups(){
+  local base="$1" keep="${2:-$BACKUP_KEEP}" pruned=0 f
+  while IFS= read -r f; do
+    [ -n "$f" ] && rm -f "$f" && pruned=$((pruned+1))
+  done < <(ls -1t "$base".bak-* 2>/dev/null | tail -n +$((keep+1)))
+  [ "$pruned" -gt 0 ] && c_ok "輪替備份：$(basename "$base") 保留最近 $keep 份，清掉 $pruned 份舊的"
+  return 0
+}
+
 echo "== Codex App model_gateway installer ($MODE) =="
 echo "   user=$USER_NAME  label=$LABEL  url=$URL"
 echo
@@ -73,13 +86,29 @@ c_ok "gateway runtime: $GW_DIR"
 NODE_BIN="$(command -v node || true)"
 CODEX_BIN="$(command -v codex || true)"
 CLAUDE_BIN="$(command -v claude || true)"
-GROK_BIN="$(command -v grok || true)"
+GROK_BIN="${GROK_REAL_BIN:-}"
+if [ -z "$GROK_BIN" ] || [ ! -x "$GROK_BIN" ]; then
+  GROK_BIN=""
+  for cand in "$HOME/.grok/bin/grok" "$(command -v grok-raw || true)" "$(command -v grok || true)"; do
+    [ -n "$cand" ] || continue
+    [ -x "$cand" ] || continue
+    [ "$cand" = "$HOME/.codex/bin/grok" ] && continue
+    GROK_BIN="$cand"
+    break
+  done
+fi
+GROK_ISOLATED_BIN="${GROK_ISOLATED_BIN:-$HOME/.codex/bin/grok-isolated}"
+GROK_COMMAND_BIN="$GROK_BIN"
+if [ -x "$GROK_ISOLATED_BIN" ]; then
+  GROK_COMMAND_BIN="$GROK_ISOLATED_BIN"
+fi
 [ -n "$NODE_BIN" ] || die "node 不在 PATH。先裝 node。"
 [ -n "$CODEX_BIN" ] || c_warn "codex CLI 不在 PATH（GUI app 仍可用，但驗收/遷移需要 codex CLI）。"
 c_ok "node:   ${NODE_BIN}"
 [ -n "$CODEX_BIN" ]  && c_ok "codex:  ${CODEX_BIN}"
 [ -n "$CLAUDE_BIN" ] && c_ok "claude: ${CLAUDE_BIN}" || c_warn "claude CLI 未偵測到 → opus/sonnet/haiku 路由不可用，要先裝 Claude Code。"
 [ -n "$GROK_BIN" ]   && c_ok "grok:   ${GROK_BIN}"   || c_warn "grok CLI 未偵測到 → grok-build 路由不可用（選用，可略）。"
+[ -x "$GROK_ISOLATED_BIN" ] && c_ok "grok isolated launcher: ${GROK_ISOLATED_BIN}" || c_warn "grok-isolated 未偵測到；gateway 仍會隔離 HOME，但 loops agent 請補 $HOME/.codex/bin/grok-isolated"
 
 # ---- detect auth state (the usual manual blockers) ----
 NEED_CODEX_LOGIN=0; NEED_GROK_LOGIN=0
@@ -92,11 +121,13 @@ if [ -f "$MINIMAX_SECRET_FILE" ]; then
 else
   c_warn "minimax key file 未偵測到 → minimax-m3 會出現在 catalog，但實際呼叫會 fail-closed。可建立 $MINIMAX_SECRET_FILE"
 fi
-if [ -n "$GROK_BIN" ]; then
-  if "$GROK_BIN" models >/dev/null 2>&1 && ! "$GROK_BIN" models 2>&1 | grep -qi 'not authenticated'; then
-    c_ok "grok authenticated"
+if [ -n "$GROK_COMMAND_BIN" ]; then
+  GROK_MODELS_OUT="$($GROK_COMMAND_BIN models 2>&1)"
+  GROK_MODELS_STATUS=$?
+  if [ "$GROK_MODELS_STATUS" = "0" ] && ! printf '%s' "$GROK_MODELS_OUT" | grep -qi 'not authenticated'; then
+    c_ok "grok authenticated（checked via ${GROK_COMMAND_BIN}）"
   else
-    c_warn "grok 未登入 → 需 'grok login --oauth'"; NEED_GROK_LOGIN=1
+    c_warn "grok 未登入或 isolated launcher 失敗 → 需 'grok login --oauth' 後重跑；raw grok 不作 loops 權限來源"; NEED_GROK_LOGIN=1
   fi
 fi
 
@@ -109,7 +140,7 @@ esac
 # bash 3.2 safe (macOS default bash has no associative arrays)
 PLIST_PATH=""
 _addpath(){ case ":$PLIST_PATH:" in *":$1:"*) ;; *) PLIST_PATH="${PLIST_PATH:+$PLIST_PATH:}$1" ;; esac; }
-for b in "$NODE_BIN" "$CLAUDE_BIN" "$GROK_BIN" "$CODEX_BIN"; do
+for b in "$NODE_BIN" "$CLAUDE_BIN" "$GROK_BIN" "$GROK_COMMAND_BIN" "$CODEX_BIN"; do
   [ -n "$b" ] && _addpath "$(dirname "$b")"
 done
 for d in /opt/homebrew/bin /usr/local/bin /usr/bin /bin /usr/sbin /sbin; do _addpath "$d"; done
@@ -132,6 +163,7 @@ if [ -f "$GW_DIR/package.json" ]; then ( cd "$GW_DIR" && npm test >/tmp/install-
 
 # 2) write launchd plist (backup if exists)
 [ -f "$PLIST" ] && cp "$PLIST" "$PLIST.bak-$TS" && c_ok "備份舊 plist → $PLIST.bak-$TS"
+rotate_backups "$PLIST"
 mkdir -p "$HOME/Library/LaunchAgents"
 {
   cat <<PLIST_EOF
@@ -156,7 +188,10 @@ mkdir -p "$HOME/Library/LaunchAgents"
     <key>GATEWAY_API_MODEL_ALLOWLIST</key><string>${API_ALLOWLIST}</string>
 PLIST_EOF
   [ -n "$CLAUDE_BIN" ] && printf '    <key>CLAUDE_COMMAND</key><string>%s</string>\n' "$CLAUDE_BIN"
-  [ -n "$GROK_BIN" ]   && printf '    <key>GROK_COMMAND</key><string>%s</string>\n' "$GROK_BIN"
+  [ -n "$GROK_COMMAND_BIN" ] && printf '    <key>GROK_COMMAND</key><string>%s</string>\n' "$GROK_COMMAND_BIN"
+  [ -n "$GROK_BIN" ] && printf '    <key>GROK_REAL_BIN</key><string>%s</string>\n' "$GROK_BIN"
+  printf '    <key>GROK_REAL_HOME</key><string>%s</string>\n' "$HOME"
+  printf '    <key>GROK_USE_ISOLATED_HOME</key><string>1</string>\n'
   cat <<PLIST_EOF
   </dict>
   <key>KeepAlive</key><true/>
@@ -168,11 +203,12 @@ PLIST_EOF
 } > "$PLIST"
 mkdir -p "$GW_DIR/logs"
 plutil -lint "$PLIST" >/dev/null || die "產生的 plist 不合法"
-c_ok "寫入 plist（CLAUDE_COMMAND/GROK_COMMAND 用絕對路徑，PATH-independent）"
+c_ok "寫入 plist（CLAUDE_COMMAND/GROK_COMMAND 用絕對路徑；GROK_COMMAND 優先使用 grok-isolated）"
 
 # 3) ensure single-provider Codex config (backup first). Target ~/.codex (GUI default).
 CFG_HOME="${CODEX_HOME_TARGET:-$HOME/.codex}"; CFG="$CFG_HOME/config.toml"
 mkdir -p "$CFG_HOME"; [ -f "$CFG" ] && cp "$CFG" "$CFG.bak-$TS" && c_ok "備份 config → $CFG.bak-$TS"
+rotate_backups "$CFG"
 touch "$CFG"
 grep -q '^model[[:space:]]*=' "$CFG" || printf 'model = "gpt-5.5"\n' >> "$CFG"
 if grep -q '^model_provider[[:space:]]*=' "$CFG"; then

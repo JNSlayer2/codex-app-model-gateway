@@ -8,8 +8,8 @@ run_grok="${RUN_GROK_SMOKE:-1}"
 run_minimax="${RUN_MINIMAX_SMOKE:-0}"
 run_app_server="${RUN_APP_SERVER_SMOKE:-1}"
 run_same_thread="${RUN_SAME_THREAD_SMOKE:-1}"
-models_re='^(gpt-5\.5|opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6|fable-5|grok-build|minimax-m3)$'
-claude_models=(opus-4-7 opus-4-8 sonnet-4-6 haiku-4-6 fable-5)
+models_re='^(gpt-5\.5|opus-4-7|opus-4-8|sonnet-5|haiku-4-5|fable-5|grok-build|minimax-m3)$'
+claude_models=(opus-4-7 opus-4-8 sonnet-5 haiku-4-5 fable-5)
 grok_models=(grok-build)
 minimax_models=(minimax-m3)
 failures=0
@@ -39,11 +39,19 @@ need_cmd curl
 need_cmd jq
 need_cmd rg
 
-if [[ -n "$gateway_dir" && -f "$gateway_dir/package.json" ]]; then
-  if (cd "$gateway_dir" && npm test >/tmp/codex-gateway-npm-test.log 2>&1 && node --check server.js); then
-    pass "gateway npm test and node --check"
+if [[ -n "$gateway_dir" && -f "$gateway_dir/server.js" ]]; then
+  if [[ -f "$gateway_dir/package.json" ]]; then
+    if (cd "$gateway_dir" && npm test >/tmp/codex-gateway-npm-test.log 2>&1 && node --check server.js); then
+      pass "gateway npm test and node --check"
+    else
+      fail "gateway npm test or node --check failed; see /tmp/codex-gateway-npm-test.log"
+    fi
   else
-    fail "gateway npm test or node --check failed; see /tmp/codex-gateway-npm-test.log"
+    if node --check "$gateway_dir/server.js" >/tmp/codex-gateway-npm-test.log 2>&1; then
+      pass "gateway node --check (runtime has no package.json tests)"
+    else
+      fail "gateway node --check failed; see /tmp/codex-gateway-npm-test.log"
+    fi
   fi
 else
   fail "gateway dir not found; set MODEL_GATEWAY_DIR=<gateway-dir>"
@@ -55,9 +63,9 @@ if [[ -n "$health" ]] && jq -e '
   .provider == "model_gateway" and
   .chatgpt_subscription_passthrough == "proxy" and
   .capabilities.openai.codex_tools == "passthrough" and
-  .capabilities.claude.codex_tools == "prompt_bridge_experimental" and
-  .capabilities.grok.codex_tools == "prompt_bridge_experimental" and
-  .capabilities.minimax.codex_tools == "prompt_bridge_experimental"
+  .capabilities.claude.codex_tools == "structured_tool_intent_bridge_experimental" and
+  .capabilities.grok.codex_tools == "structured_tool_intent_bridge_experimental" and
+  .capabilities.minimax.codex_tools == "structured_tool_intent_bridge_experimental"
 ' >/dev/null <<<"$health"; then
   pass "healthz capability matrix"
 else
@@ -79,7 +87,7 @@ if [[ -n "$catalog" ]]; then
     pass "gateway catalog hides deprecated chatgpt-pro-consult"
   fi
   if [[ "$missing" -eq 0 ]]; then
-    if jq -r '.models[]? | select(.slug|test("^(opus-4-7|opus-4-8|sonnet-4-6|haiku-4-6|fable-5)$")) | .display_name' <<<"$catalog" | rg -q '^claude-'; then
+    if jq -r '.models[]? | select(.slug|test("^(opus-4-7|opus-4-8|sonnet-5|haiku-4-5|fable-5)$")) | .display_name' <<<"$catalog" | rg -q '^claude-'; then
       fail "gateway catalog has claude-prefixed display name"
     else
       pass "gateway catalog slugs, compact Claude display names, Grok model name, and MiniMax model name"
@@ -110,10 +118,15 @@ fi
 gpt_no_auth="$(curl -sS -N "$gateway_url/v1/responses" \
   -H 'content-type: application/json' \
   -d '{"model":"chatgpt-pro-consult","input":"deprecated alias no auth should fail","stream":true}' || true)"
-if printf '%s\n' "$gpt_no_auth" | rg -q 'Authorization headers' && printf '%s\n' "$gpt_no_auth" | rg -q '"status":401'; then
-  pass "deprecated chatgpt-pro-consult compat route rejects requests without Codex session authorization"
+if printf '%s\n' "$gpt_no_auth" | rg -q 'Authorization headers' &&
+   printf '%s\n' "$gpt_no_auth" | rg -q '"degraded":true' &&
+   printf '%s\n' "$gpt_no_auth" | rg -q '"error_kind":"auth"' &&
+   printf '%s\n' "$gpt_no_auth" | rg -q '"retry_allowed":false' &&
+   printf '%s\n' "$gpt_no_auth" | rg -q 'response.completed' &&
+   ! printf '%s\n' "$gpt_no_auth" | rg -q 'response.failed'; then
+  pass "deprecated chatgpt-pro-consult compat route completes as one visible auth notice without a retry loop"
 else
-  fail "GPT passthrough unauthenticated guard did not return clear 401"
+  fail "GPT passthrough unauthenticated guard did not return the completed degraded auth notice contract"
 fi
 
 if [[ "$run_app_server" == "1" && -x "$(command -v codex 2>/dev/null)" ]]; then

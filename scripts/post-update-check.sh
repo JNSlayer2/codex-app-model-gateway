@@ -21,7 +21,7 @@ if [ -z "$GW_DIR" ]; then
     [ -f "$c/server.js" ] && { GW_DIR="$(cd "$c" && pwd)"; break; }
   done
 fi
-EXPECT_SLUGS=(gpt-5.5 opus-4-7 opus-4-8 sonnet-4-6 haiku-4-6 fable-5 grok-build minimax-m3)
+EXPECT_SLUGS=(gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna gpt-5.5 gpt-5.4 gpt-5.4-mini opus-4-7 opus-4-8 sonnet-5 haiku-4-5 fable-5 grok-build minimax-m3)
 NODE_BIN="$(command -v node || true)"
 
 full=0; [ "${1:-}" = "--full" ] && full=1
@@ -52,11 +52,12 @@ for H in "$HOME/.codex" "${CODEX_HOME:-}"; do
     warn "model_provider 不是 model_gateway  ($cfg)"
     note "還原：cp <backup>/config.toml \"$cfg\"（備份在 \$HOME/.codex/*.bak-* 或 backups/）；或重跑 install-codex-gateway.sh"
   fi
-  if grep -Eq '^[[:space:]]*model_reasoning_effort[[:space:]]*=[[:space:]]*"low"' "$cfg" 2>/dev/null; then
-    pass "model_reasoning_effort = low  ($cfg)"
+  configured_effort="$(sed -nE 's/^[[:space:]]*model_reasoning_effort[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$cfg" | head -1)"
+  if printf '%s\n' "$configured_effort" | grep -Eq '^(low|medium|high|xhigh)$'; then
+    pass "model_reasoning_effort = ${configured_effort}，屬跨 provider 共通檔位  ($cfg)"
   else
-    warn "model_reasoning_effort 不是 low/fast  ($cfg)"
-    note "修復：設 model_reasoning_effort = \"low\"；深度推理改在單條 thread/plan mode 調高"
+    warn "model_reasoning_effort 不是跨 provider 共通檔位  ($cfg)"
+    note "修復：設為 low / medium / high / xhigh；各外部 CLI 由 gateway 映射到原生推理參數"
   fi
   if grep -Eq '^[[:space:]]*service_tier[[:space:]]*=[[:space:]]*"fast"' "$cfg" 2>/dev/null; then
     pass "service_tier = fast  ($cfg)"
@@ -80,6 +81,22 @@ if curl_retry "$GATEWAY_URL/healthz" >/tmp/puc_health.json 2>/dev/null; then
   else
     warn "healthz ok!=true"
   fi
+  live_source_sha="$(json_expr /tmp/puc_health.json 'j.runtime_source && j.runtime_source.sha256' 2>/dev/null || true)"
+  current_source_sha=""
+  if [ -n "$GW_DIR" ] && [ -f "$GW_DIR/server.js" ]; then
+    current_source_sha="$(shasum -a 256 "$GW_DIR/server.js" 2>/dev/null | awk '{print $1}' || true)"
+  fi
+  if [ -z "$live_source_sha" ]; then
+    warn "healthz 缺少 runtime_source.sha256；目前 listener 不能證明載入中的 source revision"
+    note "先部署含 runtime source attestation 的 gateway，再由人工 gate 重啟；不可把 listener 綠燈當成 candidate 已生效"
+  elif [ -z "$current_source_sha" ]; then
+    warn "無法計算目前 gateway source hash：$GW_DIR/server.js"
+  elif [ "$live_source_sha" = "$current_source_sha" ]; then
+    pass "gateway runtime source revision 與磁碟 source 一致 (${live_source_sha:0:12})"
+  else
+    warn "gateway runtime/source revision 漂移（live ${live_source_sha:0:12} != disk ${current_source_sha:0:12}）"
+    note "禁止用目前 listener 驗收新修正；人工 gate 後重啟 gateway，再重跑本檢查"
+  fi
   if [ -n "$NODE_BIN" ] && json_expr /tmp/puc_health.json '!!(j.capabilities && j.capabilities.minimax && j.capabilities.minimax.spend_allowed)' >/dev/null 2>&1; then
     pass "MiniMax API route allowlisted"
   else
@@ -90,10 +107,71 @@ else
   note "重啟：launchctl kickstart -k gui/\$(id -u)/$LABEL"
 fi
 
+echo "[2b] runner isolation（Grok 不可繼承 Claude/Codex bridge 權限規則）"
+EXPECTED_GROK_COMMAND="${GROK_ISOLATED_BIN:-$HOME/.codex/bin/grok-isolated}"
+active_grok_command="$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | awk -F'=> ' '/GROK_COMMAND =>/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}' || true)"
+if [ -n "$active_grok_command" ] && [ "$active_grok_command" = "$EXPECTED_GROK_COMMAND" ]; then
+  pass "launchd active GROK_COMMAND 使用 isolated launcher ($active_grok_command)"
+elif [ -n "$active_grok_command" ]; then
+  warn "launchd active GROK_COMMAND 不是 isolated launcher: $active_grok_command"
+  note "修復：launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/$LABEL.plist && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/$LABEL.plist"
+else
+  note "無法從 launchctl 讀取 active GROK_COMMAND；繼續做 isolated HOME doctor"
+fi
+GROK_ISOLATION_DOCTOR="${GROK_ISOLATION_DOCTOR:-$GW_DIR/grok-isolation-doctor.sh}"
+if [ -n "$GW_DIR" ] && [ -x "$GROK_ISOLATION_DOCTOR" ]; then
+  if "$GROK_ISOLATION_DOCTOR" >/tmp/puc_grok_isolation.json 2>/tmp/puc_grok_isolation.err; then
+    pass "Grok isolated HOME clean（未繼承 Claude HOME/env；目標 repo 指令另由 authority doctor 檢查）"
+    note "$(tr '\n' ' ' </tmp/puc_grok_isolation.json | sed 's/[[:space:]][[:space:]]*/ /g' | cut -c1-220)"
+  else
+    warn "Grok runner isolation doctor 失敗"
+    note "$(cat /tmp/puc_grok_isolation.err /tmp/puc_grok_isolation.json 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]][[:space:]]*/ /g' | cut -c1-260)"
+  fi
+else
+  warn "找不到 Grok isolation doctor：$GROK_ISOLATION_DOCTOR"
+  note "修復：確認 gateway runtime 使用新版 grok-isolation-doctor.sh，避免 Grok 讀到 Claude 舊權限規則"
+fi
+AUTHORITY_REPO="${TATWO_AGENT_AUTHORITY_REPO:-}"
+AUTHORITY_DOCTOR="${TATWO_AGENT_AUTHORITY_DOCTOR:-}"
+if [ -z "$AUTHORITY_DOCTOR" ] && [ -n "$AUTHORITY_REPO" ]; then
+  AUTHORITY_DOCTOR="$AUTHORITY_REPO/scripts/tatwo-agent-authority-doctor.sh"
+fi
+if [ -n "$AUTHORITY_REPO" ] || [ -n "$AUTHORITY_DOCTOR" ]; then
+  if [ -n "$AUTHORITY_DOCTOR" ] && [ -x "$AUTHORITY_DOCTOR" ]; then
+    if "$AUTHORITY_DOCTOR" --repo "${AUTHORITY_REPO:-$PWD}" --json >/tmp/puc_agent_authority.json 2>/tmp/puc_agent_authority.err; then
+      if [ -n "$NODE_BIN" ] && json_expr /tmp/puc_agent_authority.json 'j.ok===true' >/dev/null 2>&1; then
+        pass "agent authority lanes clean（Claude/Grok 不會把 reviewer 規則當撤權）"
+      else
+        warn "agent authority doctor 回傳非 PASS"
+        note "$(tr '\n' ' ' </tmp/puc_agent_authority.json | sed 's/[[:space:]][[:space:]]*/ /g' | cut -c1-260)"
+      fi
+    else
+      warn "agent authority doctor 執行失敗"
+      note "$(cat /tmp/puc_agent_authority.err /tmp/puc_agent_authority.json 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]][[:space:]]*/ /g' | cut -c1-260)"
+    fi
+  else
+    warn "指定了 TATWO_AGENT_AUTHORITY_REPO/DOCTOR，但找不到可執行 doctor"
+    note "repo 內需有 scripts/tatwo-agent-authority-doctor.sh，避免 project CLAUDE.md/AGENTS.md 又把 builder 變 reviewer"
+  fi
+else
+  note "未指定 TATWO_AGENT_AUTHORITY_REPO；略過目標 repo 的 Claude/Grok lane contract 檢查"
+fi
+
 echo "[3] model catalog"
 if curl_retry "$GATEWAY_URL/v1/models" >/tmp/puc_models.json 2>/dev/null; then
   miss=""; for s in "${EXPECT_SLUGS[@]}"; do [ -n "$NODE_BIN" ] && json_has_model /tmp/puc_models.json "$s" >/dev/null 2>&1 || miss="$miss $s"; done
   [ -z "$miss" ] && pass "expected slugs 齊全" || warn "catalog 缺:$miss"
+  if [ -n "$NODE_BIN" ] && json_expr /tmp/puc_models.json '(()=>{const m=new Map((j.models||[]).map(x=>[x.slug,(x.supported_reasoning_levels||[]).map(v=>v.effort)]));const same=(s,e)=>JSON.stringify(m.get(s)||[])===JSON.stringify(e);return same("gpt-5.6-sol",["low","medium","high","xhigh"])&&same("fable-5",["low","medium","high","xhigh","max"])&&same("opus-5",["low","medium","high","xhigh","max"])&&same("grok-build",["low","medium","high","xhigh"])&&same("minimax-m3",[]);})()' >/dev/null 2>&1; then
+    pass "推理檔位依 provider 原生能力精確對齊"
+  else
+    warn "推理檔位 catalog 與 provider 原生能力不一致"
+    note "GPT=low..xhigh；Claude=low..max；Grok model reasoning=low..xhigh；MiniMax=不宣告"
+  fi
+  if [ -n "$NODE_BIN" ] && json_expr /tmp/puc_models.json '(()=>{const allowed=new Set(["gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna","gpt-5.5","gpt-5.4","gpt-5.4-mini"]); return !(j.models||[]).some(m => m.capabilities && m.capabilities.backend==="chatgpt_subscription" && !allowed.has(m.slug));})()' >/dev/null 2>&1; then
+    pass "GPT catalog 已限制為 5.4 / 5.5 / 5.6 系列"
+  else
+    warn "GPT catalog 有白名單外模型（應只列 gpt-5.4 / gpt-5.4-mini / gpt-5.5 / gpt-5.6-*）"
+  fi
   if [ -n "$NODE_BIN" ] && json_expr /tmp/puc_models.json '!(j.models||[]).some(m=>m.slug==="chatgpt-pro-consult")' >/dev/null 2>&1; then
     pass "chatgpt-pro-consult 已從 catalog/dropdown 隱藏"
   else
@@ -104,8 +182,8 @@ if curl_retry "$GATEWAY_URL/v1/models" >/tmp/puc_models.json 2>/dev/null; then
   else
     warn "chatgpt-pro-consult hidden compat route metadata 異常"
   fi
-  not_low="$([ -n "$NODE_BIN" ] && json_expr /tmp/puc_models.json '(j.models||[]).filter(m=>(m.default_reasoning_level||"")!=="low").map(m=>m.slug).join(" ")' 2>/dev/null || echo "")"
-  [ -z "$not_low" ] && pass "all catalog default_reasoning_level = low" || warn "catalog 有非 low default_reasoning_level:$not_low"
+  not_low="$([ -n "$NODE_BIN" ] && json_expr /tmp/puc_models.json '((j.models||[]).filter(m=>{const levels=Array.isArray(m.supported_reasoning_levels)?m.supported_reasoning_levels:(Array.isArray(m.capabilities?.reasoning_effort?.supported)?m.capabilities.reasoning_effort.supported:[]);return levels.length>0&&(m.default_reasoning_level||"")!=="low";}).map(m=>m.slug).join(" "))' 2>/dev/null || echo "")"
+  [ -z "$not_low" ] && pass "reasoning-capable catalog defaults = low（不支援 reasoning 的模型可為 none）" || warn "可調 reasoning 的 catalog 模型有非 low default_reasoning_level:$not_low"
 else warn "/v1/models 連不上"; fi
 
 echo "[4] codex debug models（config 端到端接通）"
@@ -115,10 +193,16 @@ if command -v codex >/dev/null 2>&1; then
     && pass "codex 看得到 gateway catalog" || { warn "codex 看不到 gateway catalog"; note "config parse error 或被更新重設；檢查 [model_providers.model_gateway]"; }
 else note "codex CLI 不在 PATH，略過"; fi
 
-echo "[5] GPT passthrough route（401 無授權 = 正確 fail-closed）"
+echo "[5] GPT passthrough route（無授權 = 可見 degraded auth 完成訊息，不進 retry loop）"
 b=$(curl_stream_retry "$GATEWAY_URL/v1/responses" -H 'content-type: application/json' \
   -d '{"model":"chatgpt-pro-consult","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"x"}]}],"stream":true}' 2>/dev/null)
-if printf '%s' "$b" | grep -q 'requires Codex ChatGPT Authorization'; then pass "deprecated chatgpt-pro-consult compat route 活著且正確 fail-closed"
+if printf '%s' "$b" | grep -q 'requires Codex ChatGPT Authorization' \
+  && printf '%s' "$b" | grep -q '"degraded":true' \
+  && printf '%s' "$b" | grep -q '"error_kind":"auth"' \
+  && printf '%s' "$b" | grep -q '"retry_allowed":false' \
+  && printf '%s' "$b" | grep -q 'response.completed' \
+  && ! printf '%s' "$b" | grep -q 'response.failed'; then
+  pass "deprecated chatgpt-pro-consult compat route 回傳單一可見 auth notice，且禁止 retry"
 elif printf '%s' "$b" | grep -q 'response.completed'; then pass "GPT route 回了完整回應"
 else warn "GPT route 回應異常"; note "'not implemented'→gateway 退版；404→hidden compat route 未保留或 config provider 沒接上"; fi
 
