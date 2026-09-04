@@ -1545,9 +1545,9 @@ function compactedBodyForSmallRoute(body, decision, originalBodyText) {
   if (!CONTEXT_AUTO_COMPACT_ENABLED) {
     return { ok: false, reason: "GATEWAY_CONTEXT_AUTO_COMPACT=0" };
   }
-  const secret = detectContextSecretRisk(originalBodyText);
-  if (secret.hasSecretRisk) {
-    return { ok: false, reason: `secret-risk (${secret.hits.join(",")}); refusing lossy compact/image route` };
+  const riskScan = detectContextSecretRisk(originalBodyText);
+  if (riskScan.hasSecretRisk) {
+    return { ok: false, reason: `secret-risk (${riskScan.hits.join(",")}); refusing lossy compact/image route` };
   }
   const images = extractImageInputs(body);
   if (images.images.length > 0 || images.unsupported.length > 0) {
